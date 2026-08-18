@@ -1,0 +1,3 @@
+# Phase 0 lab working data (shared homes). Never commit these.
+lab/home/
+*.log

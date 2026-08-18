@@ -1,0 +1,24 @@
+# Bitbucket Data Center configuration, rendered per container by lab-up.sh
+# into <shared-home>/bitbucket.properties. Reference:
+#   https://confluence.atlassian.com/bitbucketserver/bitbucket-server-config-properties-776640155.html
+#
+# The setup.* keys drive fully unattended first-boot setup (no install wizard).
+# This file is written BEFORE first start; Bitbucket consumes it at boot.
+
+# --- Unattended setup --------------------------------------------------------
+setup.displayName=BB Lab
+setup.baseUrl=http://localhost:7990
+setup.sysadmin.username=admin
+setup.sysadmin.password=admin-lab-pw
+setup.sysadmin.displayName=Lab Admin
+setup.sysadmin.emailAddress=admin@lab.example.com
+# setup.license=...   # injected by lab-up.sh when lab/license.txt is present
+
+# --- Migration export / import (DC-to-DC round trip) -------------------------
+# Flags exist since early migration support; harmless if unknown in this build.
+feature.migration.export.enabled=true
+feature.migration.import.enabled=true
+
+# --- Networking / misc -------------------------------------------------------
+server.port=7990
+plugin.branch.merge.show-merge-commits=true
