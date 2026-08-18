@@ -15,7 +15,9 @@ from .scrape import crawl
 
 def cmd_scrape(args):
     index = crawl(args.base, args.user, args.password, args.project, args.repo,
-                  args.out, git_dir=None if args.no_git else str(Path(args.out) / "git"))
+                  args.out,
+                  git_dir=None if args.no_git else str(Path(args.out) / "git"),
+                  limit_prs=args.limit_prs, checkpoint=not args.no_resume)
     print(f"scraped {args.project}/{args.repo} -> {args.out} "
           f"(project_id={index['project_id']} repo_id={index['repo_id']})")
 
@@ -68,6 +70,9 @@ def main(argv=None):
     s.add_argument("--repo", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--no-git", action="store_true")
+    s.add_argument("--limit-prs", type=int, default=0, help="cap PRs scraped (test)")
+    s.add_argument("--no-resume", action="store_true",
+                   help="ignore the checkpoint and scrape all PRs")
     s.set_defaults(fn=cmd_scrape)
 
     a = sub.add_parser("assemble")

@@ -1,11 +1,28 @@
-"""Crawler: pull every REST representation of one repo into a scrape dir.
+"""Crawler: pull every REST representation of one repo that the assembler needs.
+
+PRINCIPLE: only fetch what the archive actually needs and what is NOT already in
+the git mirror. Everything git provides (commits, trees, blobs, tags, branches,
+diffs, merge-bases) is fetched via the mirror, NOT via REST. So the REST surface
+is limited to:
+    project, repo, users, branches, tags,
+    the PR list, and per-PR detail + activities.
+
+Per-PR `diff`, `commits`, per-path `comments`, and all per-commit dumps are
+deliberately NOT fetched here — the mirror + the activity stream (which embeds
+full comment objects) cover them. (The corpus tool `corpus/capture.py` fetches
+the extra dumps for supervision; the production scraper does not.)
+
+Scalable: paginated everywhere, rate-limit aware (honors X-RateLimit-*),
+retry/backoff, and resumable via a checkpoint file (completed PR ids), so a run
+can be interrupted and continued across rate-limit windows.
 
 Output layout (consumed by `assemble`):
-    <out>/rest/*.json            raw REST dumps (same naming as corpus/rest)
-    <out>/users.json             harvested distinct users
-    <out>/index.json             scrape metadata (base, project, repo, ids, git)
-    <out>/warnings.jsonl         any unrecoverable data
-    <out>/git/                   bare mirror clone incl. PR refs
+    <out>/rest/*.json        raw REST dumps (project/repo/users/branches/tags,
+                             PR list, per-PR detail+activities)
+    <out>/users.json         harvested distinct users
+    <out>/index.json         scrape metadata (base, project, repo, ids, prs)
+    <out>/checkpoint.json    resumable progress (PR ids completed)
+    <out>/git/               bare mirror clone incl. PR refs
 """
 import json
 import os
@@ -17,120 +34,143 @@ from pathlib import Path
 import requests
 
 
-def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
-          http=None):
-    out = Path(out)
-    (out / "rest").mkdir(parents=True, exist_ok=True)
-    http = http or requests.Session()
-    http.auth = (user, password)
-    api = f"{base}/rest/api/1.0/projects/{project}/repos/{repo}"
+class Api:
+    """requests wrapper: pagination, rate-limit sleep, retry/backoff."""
 
-    index = {"scraped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-             "base": base, "project": project, "repo": repo,
-             "project_id": None, "repo_id": None, "hierarchy_id": None,
-             "users_endpoint": True, "prs": [], "git": {}}
-    warnings = []
+    def __init__(self, base, auth, quiet=False, headroom=10):
+        self.base = base
+        self.auth = auth
+        self.session = requests.Session()
+        self.session.auth = auth
+        self.headroom = headroom
+        self.limit = self.remaining = self.reset = None
 
-    def get(path, params=None):
-        url = path if path.startswith("http") else f"{base}{path}"
-        r = http.get(url, params=params, timeout=120)
-        if r.status_code >= 400:
-            warnings.append(f"GET {path} -> {r.status_code}")
-            return None
-        return r.json()
+    def _throttle(self):
+        if self.remaining is None:
+            return
+        if self.remaining > self.headroom:
+            return
+        wait = (self.reset or time.time()) - time.time() + 5
+        if wait > 0:
+            print(f"[scrape] rate limit low ({self.remaining}/{self.limit}) — "
+                  f"sleeping {int(wait)}s", flush=True)
+            time.sleep(wait)
 
-    def save(name, payload, endpoint):
-        fp = out / "rest" / f"{name}.json"
-        fp.write_text(json.dumps(payload), encoding="utf-8")
-        index.setdefault("entities", []).append({"file": f"rest/{name}.json", "endpoint": endpoint})
+    def _limits(self, resp):
+        self.limit = int(resp.headers.get("X-RateLimit-Limit", 0) or 0)
+        rl = resp.headers.get("X-RateLimit-Remaining")
+        if rl is not None:
+            self.remaining = int(rl)
+        rs = resp.headers.get("X-RateLimit-Reset")
+        if rs:
+            self.reset = int(rs)
 
-    def save_paged(name, path, params=None):
+    def get(self, path, params=None, retries=4):
+        url = path if path.startswith("http") else f"{self.base}{path}"
+        for attempt in range(retries + 1):
+            self._throttle()
+            try:
+                r = self.session.get(url, params=params, timeout=180)
+                self._limits(r)
+                if r.status_code == 200:
+                    return r.json()
+                if r.status_code == 403 and "rate limit" in r.text.lower():
+                    wait = max((self.reset or 0) - time.time() + 2, 30)
+                    print(f"[scrape] 403 rate-limited — sleeping {int(wait)}s", flush=True)
+                    time.sleep(wait)
+                    continue
+                if r.status_code in (429, 500, 502, 503, 504):
+                    wait = min(2 ** attempt * 2, 60)
+                    print(f"[scrape] HTTP {r.status_code} — retry in {wait}s", flush=True)
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+            except (requests.RequestException, ConnectionError, TimeoutError):
+                wait = min(2 ** attempt * 2, 60)
+                print(f"[scrape] network error — retry in {wait}s", flush=True)
+                time.sleep(wait)
+        raise RuntimeError(f"gave up after {retries} retries: {path}")
+
+    def paginate(self, path, params=None, per_page=100):
         params = dict(params or {})
         values, start = [], 0
         while True:
-            params["start"] = start
-            p = get(path, params)
+            p = self.get(path, {**params, "start": start, "limit": per_page})
             if p is None:
                 break
             values.extend(p.get("values", []))
             if p.get("isLastPage", True):
                 break
             start = p.get("nextPageStart", start + len(p.get("values", [])))
-        save(name, values, path)
+        return values
 
-    # --- users (harvest from all author/commenter/participant fields too) ---
-    users = get("/rest/api/1.0/users?limit=1000")
-    if users is not None:
-        index["users_endpoint"] = True
-    elif not http.auth or http.auth[0] != "admin":
-        index["users_endpoint"] = False
+
+def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
+          checkpoint=True, http=None):
+    out = Path(out)
+    (out / "rest").mkdir(parents=True, exist_ok=True)
+    api = Api(base, (user, password))
+    rest_path = f"/rest/api/1.0/projects/{project}/repos/{repo}"
+
+    index = {"scraped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+             "base": base, "project": project, "repo": repo,
+             "project_id": None, "repo_id": None, "hierarchy_id": None,
+             "users_endpoint": True, "prs": [], "git": {}}
+
+    def save(name, payload, endpoint):
+        fp = out / "rest" / f"{name}.json"
+        fp.write_text(json.dumps(payload), encoding="utf-8")
+        index.setdefault("entities", []).append(
+            {"file": f"rest/{name}.json", "endpoint": endpoint})
 
     # --- project + repo ----------------------------------------------------
-    proj = get(f"/rest/api/1.0/projects/{project}")
-    rep = get(api)
-    if proj is None or rep is None:
-        raise RuntimeError("project or repo not found on scrape")
+    proj = api.get(f"/rest/api/1.0/projects/{project}")
+    rep = api.get(rest_path)
     index["project_id"] = proj["id"]
     index["repo_id"] = rep["id"]
     index["hierarchy_id"] = rep.get("hierarchyId")
     save("project_" + project, proj, f"/rest/api/1.0/projects/{project}")
-    save(f"repo_{project}_{repo}", rep, api)
+    save(f"repo_{project}_{repo}", rep, rest_path)
 
-    save_paged(f"branches_{project}_{repo}", f"{api}/branches")
-    save_paged(f"tags_{project}_{repo}", f"{api}/tags")
+    # --- users (paginated) --------------------------------------------------
+    save("users", api.paginate("/rest/api/1.0/users"), "/rest/api/1.0/users")
 
-    # --- pull requests ------------------------------------------------------
-    r = get(f"{api}/pull-requests", {"state": "ALL", "withAttributes": True, "limit": 100})
-    prs = r["values"] if r else []
+    # --- branches + tags (paginated; refs also present in the git mirror) ----
+    save(f"branches_{project}_{repo}", api.paginate(f"{rest_path}/branches"),
+         f"{rest_path}/branches")
+    save(f"tags_{project}_{repo}", api.paginate(f"{rest_path}/tags"),
+         f"{rest_path}/tags")
+
+    # --- pull requests (paginated) ------------------------------------------
+    prs = api.paginate(f"{rest_path}/pull-requests", {"state": "ALL", "withAttributes": True})
     save(f"pull-requests_{project}_{repo}", prs,
-         f"{api}/pull-requests?state=ALL&withAttributes=true")
-    for pr in prs[: limit_prs if limit_prs else len(prs)]:
-        pid = pr["id"]
-        index["prs"].append(pid)
-        pre = f"{api}/pull-requests/{pid}"
-        save(f"pr_{pid}", get(pre, {"withAttributes": True}), pre)
-        save_paged(f"pr_{pid}_activities", f"{pre}/activities", {"limit": 100})
-        save_paged(f"pr_{pid}_commits", f"{pre}/commits", {"limit": 100})
-        diff = get(f"{pre}/diff")
-        save(f"pr_{pid}_diff", diff, f"{pre}/diff")
-        paths = sorted({d["destination"]["toString"] for d in (diff or {}).get("diffs", [])
-                        if d.get("destination")})
-        for p in paths:
-            c = get(f"{pre}/comments", {"path": p, "limit": 100})
-            if c is not None and c.get("values"):
-                safe = p.replace("/", "_").replace(".", "_")
-                save(f"pr_{pid}_comments_path_{safe}", c["values"], f"{pre}/comments?path={p}")
-        print(f"[scrape] PR {pid}: activities/commits/diff/comments")
+         f"{rest_path}/pull-requests?state=ALL&withAttributes=true")
 
-    # --- commits + commit comments ------------------------------------------
-    shas = set()
-    for br in (get(f"{api}/branches", {"limit": 100}) or {}).get("values", []):
-        shas.add(br["latestCommit"])
-    for tg in (get(f"{api}/tags", {"limit": 100}) or {}).get("values", []):
-        shas.add(tg["latestCommit"])
-    for c in (get(f"{api}/commits", {"until": "refs/heads/main", "limit": 100}) or {}).get("values", []):
-        shas.add(c["id"])
-    for sha in sorted(shas):
-        d = get(f"{api}/commits/{sha}")
-        if d is None:
-            continue
-        save(f"commit_{sha}", d, f"{api}/commits/{sha}")
-        changed, start = [], 0
-        while True:
-            page = get(f"{api}/commits/{sha}/changes", {"limit": 100, "start": start})
-            if page is None:
-                break
-            changed.extend(page.get("values", []))
-            if page.get("isLastPage", True):
-                break
-            start = page.get("nextPageStart", start + len(page.get("values", [])))
-        save(f"commit_{sha}_changes", changed, f"{api}/commits/{sha}/changes")
-        for p in sorted({c["path"]["toString"] for c in changed if c.get("path")}):
-            safe = p.replace("/", "_").replace(".", "_")
-            cm = get(f"{api}/commits/{sha}/comments", {"path": p, "limit": 100})
-            if cm and cm.get("values"):
-                save(f"commit_{sha}_comments_path_{safe}", cm["values"],
-                     f"{api}/commits/{sha}/comments?path={p}")
+    # --- checkpoint / resume ------------------------------------------------
+    ckpt_path = out / "checkpoint.json"
+    done = set()
+    if checkpoint and ckpt_path.exists():
+        try:
+            done = set(json.loads(ckpt_path.read_text()).get("prs_done", []))
+        except Exception:
+            done = set()
+
+    todo = [p["id"] for p in prs]
+    if limit_prs:
+        todo = todo[:limit_prs]
+    todo = [pid for pid in todo if pid not in done]
+    total = len(todo)
+    for i, pid in enumerate(todo, 1):
+        pre = f"{rest_path}/pull-requests/{pid}"
+        save(f"pr_{pid}", api.get(pre, {"withAttributes": True}), pre)
+        save_paged_list = api.paginate(f"{pre}/activities")
+        save(f"pr_{pid}_activities", save_paged_list, f"{pre}/activities")
+        index["prs"].append(pid)
+        if checkpoint:
+            done.add(pid)
+            ckpt_path.write_text(json.dumps({"prs_done": sorted(done)}))
+        if total and (i % 25 == 0 or i == total):
+            print(f"[scrape] PR {i}/{total} done", flush=True)
 
     # --- git mirror ----------------------------------------------------------
     if git_dir is not None:
@@ -153,7 +193,7 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index, git="git")
         subprocess.run([git, "init", "--bare", "--quiet", git_dir], check=True)
     url = git_mirror_url(base, user, password, project, repo)
     subprocess.run([git, "remote", "add", "origin", url], check=True, cwd=git_dir)
-    # fetch everything incl. PR refs
+    # fetch everything incl. PR refs (commits/trees/blobs/tags come from here)
     subprocess.run([git, "-c", "remote.origin.fetch=", "fetch",
                     "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*",
                     "+refs/pull-requests/*:refs/pull-requests/*",
@@ -173,9 +213,12 @@ def main():
     ap.add_argument("--repo", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--no-git", action="store_true")
+    ap.add_argument("--limit-prs", type=int, default=0)
+    ap.add_argument("--no-resume", action="store_true")
     args = ap.parse_args()
     index = crawl(args.base, args.user, args.password, args.project, args.repo, args.out,
-                  git_dir=None if args.no_git else os.path.join(args.out, "git"))
+                  git_dir=None if args.no_git else os.path.join(args.out, "git"),
+                  limit_prs=args.limit_prs, checkpoint=not args.no_resume)
     print(f"scraped {index['project']}/{index['repo']} -> {args.out}")
 
 

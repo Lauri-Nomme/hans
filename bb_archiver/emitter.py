@@ -289,13 +289,9 @@ class Emitter:
 
     # ---------------- PR caches ------------------------------------------
     def pr_cache(self, pr):
-        """cached-ancestor.txt = fromTip,toTip,mergeBase (no newline)."""
-        base = None
-        diff = self.m.pr_diff(pr["id"]) or {}
-        base = (diff.get("fromHash") if diff else None)
-        if base is None:
-            # fall back to merge-base of the two tips if we can compute it
-            base = self._merge_base(pr)
+        """cached-ancestor.txt = fromTip,toTip,mergeBase (no newline).
+        merge-base is computed from the git mirror (not a REST diff)."""
+        base = self._merge_base(pr)
         if base is None:
             base = self.m.pr(pr["id"])["fromRef"]["latestCommit"]
         line = f"{pr['fromRef']['latestCommit']},{pr['toRef']['latestCommit']},{base}"
@@ -354,76 +350,105 @@ class Emitter:
         # empty tar = 1024 zero bytes (no entries); matches real exporter
         return _gzbuf(b"\x00" * 1024)
 
-    def git_objects(self):
-        """Repack the mirror into loose objects, return tar bytes."""
+    def git_objects(self, out_path):
+        """Repack the mirror, stream loose objects into an inner tar on disk at
+        `out_path` (O(1) memory — never loads the pack or all objects at once)."""
         gitdir = self.m.dir / "git"
         tmp = tempfile.mkdtemp(prefix="objpack-")
-        subprocess.run(["git", "init", "-q", "-b", "unused", "--bare", tmp],
-                       check=True, capture_output=True)
         try:
-            # write a fresh pack (nothing to keep -> repack all), then unpack
+            # fresh single pack from the mirror
             if os.path.isdir(os.path.join(gitdir, "objects", "pack")):
-                subprocess.run(["git", "repack", "-adf"], check=True, cwd=gitdir)
+                subprocess.run(["git", "repack", "-adf"], check=True, cwd=gitdir,
+                               capture_output=True)
             packdir = os.path.join(gitdir, "objects", "pack")
             packs = [p for p in os.listdir(packdir) if p.endswith(".pack")]
             if not packs:
                 raise RuntimeError("no pack produced by repack")
-            subprocess.run(["git", "unpack-objects", "-q", "-r"],
-                           check=True, cwd=tmp,
-                           input=Path(packdir, packs[0]).read_bytes())
-            # now loose objects live in tmp/objects/<ab>/<rest>
-            entries = {}
-            objs = os.path.join(tmp, "objects")
-            for ab in os.listdir(objs):
-                for name in os.listdir(os.path.join(objs, ab)):
-                    data = Path(objs, ab, name).read_bytes()
-                    entries[f"{ab}/{name}"] = data
-            return _tar_buf(entries, mode=0o400)
+            # stream-unpack the pack into loose objects (no in-memory buffer)
+            subprocess.run(["git", "init", "-q", "-b", "unused", "--bare", tmp],
+                           check=True, capture_output=True)
+            with open(os.path.join(packdir, packs[0]), "rb") as pf:
+                subprocess.run(["git", "unpack-objects", "-q", "-r"],
+                               check=True, cwd=tmp, stdin=pf,
+                               capture_output=True)
+            # stream loose objects straight into a tar file on disk
+            with tarfile.open(out_path, "w", format=tarfile.PAX_FORMAT) as tar:
+                objs = os.path.join(tmp, "objects")
+                for ab in os.listdir(objs):
+                    abdir = os.path.join(objs, ab)
+                    for name in os.listdir(abdir):
+                        fp = os.path.join(abdir, name)
+                        size = os.path.getsize(fp)
+                        ti = tarfile.TarInfo(f"{ab}/{name}")
+                        ti.size = size
+                        ti.mode = 0o400
+                        ti.mtime = 0
+                        ti.uid = ti.gid = 0
+                        with open(fp, "rb") as f:
+                            tar.addfile(ti, f)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+        return out_path
 
     # ---------------- assemble --------------------------------------------
     def assemble(self, out_path):
-        with tarfile.open(out_path, "w", format=tarfile.PAX_FORMAT) as tar:
-            def add(name, data):
-                ti = tarfile.TarInfo(name)
-                ti.size = len(data)
-                ti.mode = 0o644
-                ti.mtime = self.mtime
-                ti.uid = ti.gid = 0
-                tar.addfile(ti, io.BytesIO(data))
+        objtar = tempfile.NamedTemporaryFile(prefix="objects-", suffix=".tar",
+                                             delete=False)
+        objtar_name = objtar.name
+        objtar.close()
+        try:
+            self.git_objects(objtar_name)
+            with tarfile.open(out_path, "w", format=tarfile.PAX_FORMAT) as tar:
+                def add(name, data):
+                    ti = tarfile.TarInfo(name)
+                    ti.size = len(data)
+                    ti.mode = 0o644
+                    ti.mtime = self.mtime
+                    ti.uid = ti.gid = 0
+                    tar.addfile(ti, io.BytesIO(data))
 
-            add(f"{META}_instanceDetails/instance-details.json.atl.gz",
-                self.instance_details())
-            add(f"{META}_metadata/project_{self.pid}/project.json.atl.gz",
-                self.project_file())
-            add(f"{META}_permissions/project/{self.pid}/all-permissions.json.atl.gz",
-                self.all_permissions())
-            add(f"{META}_permissions/project/{self.pid}/permissions.json.atl.gz",
-                self.project_permissions())
-            add(f"_/repository/hierarchy_begin/{self.hid}", b"")
-            add(f"{META}_metadata/project_{self.pid}/repository_{self.rid}.json.atl.gz",
-                self.repository_file())
-            add(f"{META}_permissions/repository/{self.rid}/permissions.json.atl.gz",
-                self.repository_permissions())
-            add(f"{GIT}/repositories/{self.rid}/metadata/metadata.atl.tar.atl.gz",
-                self.git_metadata())
-            add(f"{GIT}/repositories/{self.rid}/hooks/hooks.atl.tar.atl.gz",
-                self.git_hooks())
-            add(f"{GIT}/repositories/{self.rid}/contents/objects.atl.tar",
-                self.git_objects())
-            add(f"{LFS}/{self.rid}/git-lfs-settings.json.atl.gz",
-                self.gitlfs_settings())
-            for pr in sorted(self.m.prs() or [], key=lambda p: p["id"]):
-                pid = pr["id"]
-                add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/metadata.json.atl.gz",
-                    self.pr_metadata(pr))
-                add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/activities.json.atl.gz",
-                    self.pr_activities(pr))
-                add(f"{GITPR}/repositories/{self.rid}/pullrequests/{pid}/caches.atl.tar.atl.gz",
-                    self.pr_cache(pr))
-            add(f"_/repository/hierarchy_end/{self.hid}", b"")
-        return out_path
+                def add_file(name, src_path):
+                    ti = tarfile.TarInfo(name)
+                    ti.size = os.path.getsize(src_path)
+                    ti.mode = 0o644
+                    ti.mtime = self.mtime
+                    ti.uid = ti.gid = 0
+                    with open(src_path, "rb") as f:
+                        tar.addfile(ti, f)
+
+                add(f"{META}_instanceDetails/instance-details.json.atl.gz",
+                    self.instance_details())
+                add(f"{META}_metadata/project_{self.pid}/project.json.atl.gz",
+                    self.project_file())
+                add(f"{META}_permissions/project/{self.pid}/all-permissions.json.atl.gz",
+                    self.all_permissions())
+                add(f"{META}_permissions/project/{self.pid}/permissions.json.atl.gz",
+                    self.project_permissions())
+                add(f"_/repository/hierarchy_begin/{self.hid}", b"")
+                add(f"{META}_metadata/project_{self.pid}/repository_{self.rid}.json.atl.gz",
+                    self.repository_file())
+                add(f"{META}_permissions/repository/{self.rid}/permissions.json.atl.gz",
+                    self.repository_permissions())
+                add(f"{GIT}/repositories/{self.rid}/metadata/metadata.atl.tar.atl.gz",
+                    self.git_metadata())
+                add(f"{GIT}/repositories/{self.rid}/hooks/hooks.atl.tar.atl.gz",
+                    self.git_hooks())
+                add_file(f"{GIT}/repositories/{self.rid}/contents/objects.atl.tar",
+                         objtar_name)
+                add(f"{LFS}/{self.rid}/git-lfs-settings.json.atl.gz",
+                    self.gitlfs_settings())
+                for pr in sorted(self.m.prs() or [], key=lambda p: p["id"]):
+                    pid = pr["id"]
+                    add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/metadata.json.atl.gz",
+                        self.pr_metadata(pr))
+                    add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/activities.json.atl.gz",
+                        self.pr_activities(pr))
+                    add(f"{GITPR}/repositories/{self.rid}/pullrequests/{pid}/caches.atl.tar.atl.gz",
+                        self.pr_cache(pr))
+                add(f"_/repository/hierarchy_end/{self.hid}", b"")
+            return out_path
+        finally:
+            os.unlink(objtar_name)
 
 
 CONFIG_BYTES = (
