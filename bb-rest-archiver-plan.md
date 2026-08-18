@@ -235,6 +235,12 @@ Phase 3 complete:
       GEI note: no `migrate` PAT scope exists (my earlier claim was wrong) — the required
       scopes are `repo`, `read:org` (migrator role) or `admin:org` (owner), `workflow`;
       the real prerequisite is an Enterprise-plan org + owner/migrator role.
+      `corpus/gate3.py` is **scale-ready** (10k PRs / 100k commits): rate-limit-aware
+      client (backoff on 429/5xx, ETag 304, `Link:` pagination, X-RateLimit-Reset
+      sleeping), resumable `--deep` per-PR review/comment checks persisted to a state
+      file (Ctrl-C safe, runs across rate windows), git `ls-remote` ref compare + full
+      object-wise compare against the scrape mirror, progress reporting, and
+      mannequin-tolerant reviewer-set comparison.
 
 ## Phase 6 — Production runbook
 
