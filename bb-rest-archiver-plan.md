@@ -222,8 +222,19 @@ Phase 3 complete:
       BLOCKER comments reproduce exactly through the official re-export. Run with
       default args against bb-lab-b (needs `sudo nerdctl`). NOTE: repo ids are
       instance-specific (A=2, B=1 on the current lab) — pass `--repo-id-real/--repo-id-syn`.
-- [ ] **Gate 3 — end-to-end GEI**: `gh bbs2gh migrate-repo --archive-path` +
-      mannequin reclaim. Requires a throwaway Enterprise trial org; not yet run.
+- [x] **Gate 3 — end-to-end GEI (PASS)**: the tool's archive (`/tmp/opencode/synth-a4.tar`)
+      was accepted by `gh bbs2gh migrate-repo --archive-path ... --use-github-storage`
+      into the `unapplicable` org (now on Enterprise trial) and migrated successfully
+      (1 benign warning: "Allow Forking" not enabled at org level). Verified with
+      `corpus/gate3.py`: PR states + merged flags (1/2/3 merged, 4 open, 5 declined),
+      all 6 branches, tags v1.0 (lightweight) + v1.1 (annotated), main tip =
+      PR1 merge commit `a668497c…` — **git SHAs byte-identical** to the golden corpus;
+      review states (alan/grace APPROVED, alan CHANGES_REQUESTED on PR4),
+      comment bodies (unicode/emoji/@mentions) and inline anchors preserved;
+      git author identities intact (Ada Lovelace/Grace Hopper/Alan Turing + emails).
+      GEI note: no `migrate` PAT scope exists (my earlier claim was wrong) — the required
+      scopes are `repo`, `read:org` (migrator role) or `admin:org` (owner), `workflow`;
+      the real prerequisite is an Enterprise-plan org + owner/migrator role.
 
 ## Phase 6 — Production runbook
 
