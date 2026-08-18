@@ -5,3 +5,5 @@ lab/home/
 lab/license*.txt
 # Agent memory store.
 .mnemonics/__pycache__/
+__pycache__/
+*.pyc
