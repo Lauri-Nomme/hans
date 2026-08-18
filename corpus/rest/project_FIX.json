@@ -1,0 +1,1 @@
+{"key": "FIX", "id": 1, "name": "Fixture Project", "description": "Golden fixture corpus", "public": false, "type": "NORMAL", "links": {"self": [{"href": "http://localhost:7990/projects/FIX"}]}}

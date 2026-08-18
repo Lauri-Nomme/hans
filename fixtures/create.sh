@@ -84,6 +84,7 @@ EOF
 def add(a, b):
     return a + b
 EOF
+  git add src/util.py
   mkcommit "Grace Hopper" "grace@example.com" "Ada Lovelace" "ada@example.com" "2024-02-01T09:30:00+00:00" "feat: add core utility library"
 
   cat > CONTRIBUTING.md <<'EOF'
