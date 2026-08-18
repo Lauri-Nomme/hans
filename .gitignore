@@ -3,3 +3,5 @@ lab/home/
 *.log
 # Bitbucket licenses are credentials; never commit them.
 lab/license*.txt
+# Agent memory store.
+.mnemonics/

@@ -62,27 +62,28 @@ Script ALL of the following via REST + git pushes (fully reproducible, idempoten
 Use ≥3 distinct users with distinct display names/emails (they become GEI mannequins later).
 
 Git layer:
-- [ ] commits with crafted `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` and distinct author/committer
-- [ ] branches, tags (lightweight + annotated)
-- [ ] a merge commit, a squash merge, a fast-forward merge
+- [x] commits with crafted `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` and distinct author/committer
+- [x] branches, tags (lightweight + annotated)
+- [x] a merge commit, a squash merge, a fast-forward merge
 - [ ] an LFS object IF production uses LFS (otherwise skip — GEI doesn't migrate LFS anyway)
 
 PR layer (the core):
-- [ ] PR in each terminal state: MERGED, DECLINED, OPEN
-- [ ] approvals, un-approvals (approval withdrawn), NEEDS_WORK status
-- [ ] reviewers added/removed mid-review
-- [ ] top-level comments; comment replies (threads); comment edits; a deleted comment `[VERIFY:
-      visible in activities? in export?]`
-- [ ] inline comments anchored on: added line, removed line, context line, file-level; on a file
-      that was later force-pushed away (orphaned anchor)
-- [ ] force push on PR branch (RESCOPED activity), including one that removes previously
+- [x] PR in each terminal state: MERGED, DECLINED, OPEN
+- [x] approvals, un-approvals (approval withdrawn), NEEDS_WORK status
+- [x] reviewers added/removed mid-review
+- [x] top-level comments; comment replies (threads); comment edits; a deleted comment `[VERIFY:
+      visible in activities? in export?]` — REST delete is HARD on 9.4.18 (no trace; see FIXTURES.md)
+- [x] inline comments anchored on: added line, removed line, context line, file-level; on a file
+      that was later force-pushed away (orphaned anchor) — drift processor re-anchors instead of
+      orphaning on 9.4.18; the anchor's fromHash/toHash shift is captured (see FIXTURES.md)
+- [x] force push on PR branch (RESCOPED activity), including one that removes previously
       commented-on commits
-- [ ] PR title and description edits (UPDATED activity)
-- [ ] PR tasks, if production uses them
-- [ ] unicode/emoji/markdown in all text fields; @mentions
-- [ ] a merged PR followed by source-branch deletion (KNOWN-BAD case — study what real export
+- [x] PR title and description edits (UPDATED activity)
+- [ ] PR tasks, if production uses them — tasks API 404s on 9.4.18 (not in corpus; re-check)
+- [x] unicode/emoji/markdown in all text fields; @mentions
+- [x] a merged PR followed by source-branch deletion (KNOWN-BAD case — study what real export
       does with it)
-- [ ] commit-level comments on the repo (not expected to migrate, but observe their export form)
+- [x] commit-level comments on the repo (not expected to migrate, but observe their export form)
 
 Deliverable: `fixtures/` scripts + `FIXTURES.md` enumerating each fixture with its expected
 REST representation.
@@ -206,12 +207,20 @@ the trial org to confirm attribution mapping works end-to-end.
    reveal.)
 2. Are PR refs (`refs/pull-requests/*`) in exported repos, and does GEI rely on them for
    merged-PR import? (May be the difference between success and the known 500s.)
-3. Is `/rest/api/1.0/users` enumerable as a normal user, or must users be harvested per-entity?
+3. `/rest/api/1.0/users` IS enumerable as a normal user on 9.4.18 (resolved). Use it, but also
+   harvest per-entity author/commenter objects.
 4. Does GEI validate the archive's app-version marker against a supported range, and is 9.4.18
    the right value to claim?
 5. Import-endpoint round trip: exact API shape (Atlassian "Importing" docs).
 6. Scale: archive size limits (GEI documents ~10 GB/repo archive limits) — chunk strategy for
    giant repos.
+7. Reviewer-state model: Bitbucket resets approvals/NEEDS_WORK on ANY PR mutation (push,
+   target advance, title edit) and a drift processor re-anchors inline comments async — the
+   exporter must read final participant state + full activity log, not assume consistency.
+8. PR tasks API is absent on 9.4.18 (404) — if production exposes it, re-open the fixture;
+   otherwise tasks are out of scope.
+9. Deleted comments: REST delete is hard (no activity trace) — the exporter can only observe
+   what remains; confirm the real exporter's behavior in Phase 3.
 
 ## Non-goals
 
