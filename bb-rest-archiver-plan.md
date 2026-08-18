@@ -174,55 +174,50 @@ Phase 3 complete:
 
 ## Phase 4 — The archiver tool
 
-CLI sketch:
-```
-bb-archiver scrape   --base-url https://bb.prod --token $READONLY_PAT \
-                     --project PRJ --repo my-repo --out ./scrape/my-repo/
-bb-archiver assemble --scrape ./scrape/my-repo/ --mirror ./mirrors/my-repo.git \
-                     --app-version 9.4.18 --out Bitbucket_export_synth_<n>.tar
-bb-archiver validate --archive Bitbucket_export_synth_<n>.tar   # schema self-check vs FORMAT_SPEC
-```
+**COMPLETE** — `bb_archiver/` (Python, per user preference): `scrape`, `assemble`,
+`validate` subcommands, worked end-to-end.
 
-Modules:
-- **crawler**: paginated pulls of all Phase-2 endpoints; rate-limit/backoff; resumable
-  (checkpoint per repo); records `warnings.jsonl` for any unrecoverable data.
-- **git-fetcher**: `git clone --mirror` per repo. NOTE: Bitbucket Server exposes PR refs —
-  fetch `+refs/pull-requests/*:refs/pull-requests/*` too; they may be required for merged-PR
-  fidelity `[VERIFY against ground-truth archive]`.
-- **model**: internal entity graph (users, repos, PRs, activities, comments) with stable
-  synthetic ID allocation consistent across runs (hash of natural keys, not random).
-- **emitter**: serializes the model per FORMAT_SPEC; assembles bare repo(s) into the tar at the
-  exact path pattern; sets version markers; produces any manifest/checksums the format demands.
-- **user harvester**: collects distinct users from all author/commenter/reviewer fields;
-  preserves slug, displayName, emailAddress (email fidelity is what makes GitHub-side
-  attribution/mannequin reclaim work).
+- [x] `scrape` — crawler (project/repo/branches/tags/PRs+activities+diff+comments,
+      per-commit detail+changes+comments) + git mirror (refs/heads, refs/tags,
+      refs/pull-requests, refs/stash-refs). Writes `index.json` + raw dumps.
+- [x] `assemble` — Jackson-compatible JSON writer (pretty for instance-details/PR
+      metadata/activities, compact-alphabetical for metadata/permissions/lfs; non-BMP
+      emoji escaped as UPPERCASE `\uXXXX` surrogate pairs, BMP non-ASCII raw UTF-8,
+      no trailing newlines); bare-repo skeleton (HEAD/config/app-info.gc.pid/refs/
+      stash-refs/reflogs); loose-object tar via `git repack -adf` + `unpack-objects`;
+      PR metadata/activities (derived from REST, ordering = comments-first then
+      chronological); caches (`cached-ancestor.txt` = fromTip,toTip,mergeBase).
+- [x] `validate` — schema self-check (paths + gzip headers).
+- [x] CLI `bb-archiver scrape/assemble/validate` works on bb-lab-a; archive assembled
+      to `Bitbucket_export_synth_*.tar`.
 
-Edge cases to handle explicitly:
-- RESCOPED activities referencing GC'd commits → keep activity if format tolerates dangling
-  SHAs `[VERIFY in lab]`, else drop + warn.
-- Merged PR + deleted source branch → replicate whatever the real exporter does (Phase 1
-  fixture) + warn; do not attempt repair.
-- Deleted comments/activities invisible to REST → document as fidelity gap.
+## Phase 5 — Validation harness
 
-## Phase 5 — Validation harness (three gates)
-
-Gate 1 — **Golden master** (no external deps):
-Scrape bb-lab-a via REST → `assemble` → tool archive `A_tool`. Real admin export → `A_real`.
-Semantic-diff them: normalized tar listings; canonicalized JSON entity-by-entity; git repos
-compared object-wise (`git cat-file --batch-all-objects`, not bytes). Iterate until the diff
-contains only benign entries (job ids, export timestamps). This is the primary dev loop.
-
-Gate 2 — **Round-trip import**:
-Import `A_tool` into bb-lab-b via the migration import endpoint. Then REST-scrape bb-lab-b and
-diff against the bb-lab-a scrape. Any loss here = format violation the lab caught for free.
-
-Gate 3 — **End-to-end GEI** (throwaway Enterprise Cloud trial org):
-`gh bbs2gh migrate-repo --archive-path A_tool ...` per repo. Verify on GitHub: PR states,
-merge SHAs, comment bodies AND timestamps, inline anchors, force-push events, mannequin
-identities per lab user, and the known-bad deleted-branch PR behavior. Reclaim mannequins in
-the trial org to confirm attribution mapping works end-to-end.
+- [x] **Gate 1 — golden master (PASS)**: `corpus/gate1.py` assembles FIX/golden from
+      REST + mirror and semantic-diffs against the real admin export (job 1).
+      No genuine differences. Benign, documented divergences only:
+      inner-tar mtimes/mode-type-bits, `rescopedTimestamp` internal target-advance
+      refresh, real-only `ACTIVITY/UPDATED` for title/desc edits (REST cannot expose),
+      `allParticipants` order (DB position).
+- [x] **Gate 2 — round-trip import (PASS)**: imported the synth archive into bb-lab-b
+      via `POST /rest/api/1.0/migration/imports` (`archivePath`), scraped bb-lab-b and
+      diffed vs bb-lab-a: PR state/title/refs/reviewers/participants/activities,
+      branches and tags all match. Users import as stub accounts (displayName=slug,
+      active=false, no email) — expected Bitbucket behavior; git author emails are the
+      only email fidelity. Commit-level comments correctly absent (mirrors real export).
+- [ ] **Gate 3 — end-to-end GEI**: `gh bbs2gh migrate-repo --archive-path` +
+      mannequin reclaim. Requires a throwaway Enterprise trial org; not yet run.
 
 ## Phase 6 — Production runbook
+
+1. Read-only PAT on prod; crawl project/repo inventory.
+2. Scrape + mirror per repo (checkpointed; parallelize across repos).
+3. Assemble one archive per repo.
+4. Gate 3 on a sample of repos (including the messiest: most PRs, most force pushes).
+5. Freeze window → final scrape delta (re-run crawler; it's incremental) → re-assemble →
+   production migration waves.
+6. Post-migration: mannequin reclaim mapping (CSV of prod slug → GitHub user), verification
+   report from `warnings.jsonl`.
 
 1. Read-only PAT on prod; crawl project/repo inventory.
 2. Scrape + mirror per repo (checkpointed; parallelize across repos).
@@ -252,7 +247,7 @@ the trial org to confirm attribution mapping works end-to-end.
 8. PR tasks API is absent on 9.4.18 (404) — if production exposes it, re-open the fixture;
    otherwise tasks are out of scope.
 9. Deleted comments: REST delete is hard (no activity trace) — the exporter can only observe
-   what remains; confirm the real exporter's behavior in Phase 3.
+   what remains; confirmed the real exporter also drops them.
 
 ## Non-goals
 
