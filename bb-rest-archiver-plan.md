@@ -107,6 +107,18 @@ For the golden repo, capture BOTH views of every entity:
 Deliverable: `corpus/` directory with REST dumps beside the extracted ground-truth archive,
 indexed by a manifest mapping fixture → rest-dump-file → archive-region (filled in Phase 3).
 
+Phase 2 complete:
+
+- [x] `corpus/capture.py` — raw REST dumps for project/repo/users/branches/tags, per-PR detail
+      + activities + per-path comments + commits + diff, per-commit detail + changes + per-path
+      commit comments; writes `corpus/manifest.json` (file → endpoint).
+- [x] Real admin export triggered via `POST /rest/api/1.0/migration/exports` (job 1), extracted
+      into `ground-truth/export-a/` (archive layout documented in `fixtures/FIXTURES.md`).
+- [x] `corpus/compare.py` — pairing check: archive PR metadata matches REST dumps; activity
+      counts differ by design (archive `kind` schema ≠ REST `action` schema) — see FIXTURES.md.
+- [x] Fixed fixture bug: C2 (`feat: add core utility library`) was an empty commit — missing
+      `git add src/util.py`; hotfix now MODIFIES util.py instead of ADDing it (new corpus SHAs).
+
 ## Phase 3 — Format reverse engineering
 
 Produce `FORMAT_SPEC.md`. Method:

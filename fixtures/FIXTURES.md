@@ -94,3 +94,38 @@ For each fixture, the exporter must reproduce from REST dumps:
 - Tags: lightweight (`v1.0`) vs annotated (`v1.1`) — annotated exposes tagger
   + message (object + peeled `^{}`).
 - Branches: which exist after merges (source branch NOT auto-deleted = KNOWN-BAD).
+
+## Admin export archive (ground truth, Phase 2)
+
+Triggered over REST: `POST /rest/api/1.0/migration/exports`
+(`{"repositoriesRequest":{"includes":[{"projectKey":"FIX","slug":"golden"}]}}`),
+poll `GET /rest/api/1.0/migration/exports/<jobId>` until `COMPLETED`; archive lands in
+`$BITBUCKET_SHARED_HOME/data/migration/export/Bitbucket_export_<jobId>.tar` (plain tar,
+not gzip). Extracted into `ground-truth/export-a/`.
+
+Archive layout (repo `id` = 15):
+
+- `com.atlassian.bitbucket.server.bitbucket-instance-migration_instanceDetails/instance-details.json.atl.gz`
+  → product/version/build/`archiveVersion: 2`/`nodeId`/instance name.
+- `..._metadata/project_1/project.json.atl.gz` → `{description,id,key,name,public,type}`.
+- `..._metadata/project_1/repository_15.json.atl.gz` → `{forkable,hierarchyId,id,name,projectId,public,scmId,slug}`.
+- `..._permissions/project/1/{all-permissions,permissions}.json.atl.gz`, `..._permissions/repository/15/permissions.json.atl.gz`.
+- `com.atlassian.bitbucket.server.bitbucket-git_git/repositories/15/{contents/objects.atl.tar, metadata/metadata.atl.tar.atl.gz, hooks/hooks.atl.tar.atl.gz}`.
+- `..._bitbucket-git-lfs_gitLfsSettings/15/git-lfs-settings.json.atl.gz`.
+- `..._pullRequests/repository/15/pullrequest/{id}/metadata.json.atl.gz` + `activities.json.atl.gz`;
+  `com.atlassian.bitbucket.server.bitbucket-git_gitPullRequests/repositories/15/pullrequests/{id}/caches.atl.tar.atl.gz`.
+- `_/repository/hierarchy_{begin,end}/<hierarchyId>` markers.
+
+Verified pairing facts (`corpus/compare.py`):
+
+- PR metadata `state`/`title`/`description`/`fromRef.latestCommit`/`toRef.latestCommit`
+  exactly match the REST `pull-requests?state=ALL&withAttributes=true` dumps (PR1-5 all match).
+- **Archive activities use a DIFFERENT schema than REST `/activities`**:
+  archive records `kind` ∈ `COMMENT:ADDED`, `COMMENT:OTHER` (comment edits), `ACTIVITY`,
+  `REVIEWERS:UPDATED` (review/approve state changes), `RESCOPED`, `MERGED`;
+  REST uses `action` ∈ `OPENED`, `UPDATED`, `COMMENTED`, `APPROVED`, `UNAPPROVED`,
+  `REVIEWED`, `RESCOPED`, `MERGED`, `DECLINED`. Counts therefore differ:
+  PR1 archive=15 rest=12, PR4 archive=14 rest=13; others equal. Archive activity count
+  is NOT derivable 1:1 from REST activities — Phase 3 must map each archive `kind` back
+  to the REST events that produced it (e.g. a REST `COMMENTED` with a comment edit yields
+  one `COMMENT:ADDED` + `COMMENT:OTHER`).
