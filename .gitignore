@@ -1,3 +1,5 @@
 # Phase 0 lab working data (shared homes). Never commit these.
 lab/home/
 *.log
+# Bitbucket licenses are credentials; never commit them.
+lab/license*.txt
