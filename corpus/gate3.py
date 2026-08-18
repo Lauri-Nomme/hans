@@ -37,6 +37,26 @@ from pathlib import Path
 API = "https://api.github.com"
 
 
+def log(msg):
+    """Print with an ISO-8601 UTC timestamp prefix for correlation."""
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}", flush=True)
+
+
+def norm_comment(text):
+    """Normalize a comment body so BB and GH markdown renderings compare equal:
+    strip markdown quote markers (`> ` lines), leading/trailing space, collapse
+    internal whitespace."""
+    if text is None:
+        return ""
+    lines = []
+    for ln in str(text).splitlines():
+        ln = ln.lstrip()
+        while ln.startswith(">"):
+            ln = ln[1:].lstrip()
+        lines.append(ln)
+    return re.sub(r"\s+", " ", " ".join(lines)).strip()
+
+
 class RateLimitClient:
     """urllib wrapper: rate-limit aware, retry with backoff, ETag cache, paginate."""
 
@@ -67,8 +87,8 @@ class RateLimitClient:
         now = int(time.time())
         wait = (self.reset or now) - now + 5
         if wait > 0:
-            print(f"[gate3] rate limit low ({self.remaining}/{self.limit}) — "
-                  f"sleeping {wait}s until reset", flush=True)
+            log(f"rate limit low ({self.remaining}/{self.limit}) — "
+                f"sleeping {wait}s until reset")
             time.sleep(wait)
 
     def _update_limits(self, headers):
@@ -108,19 +128,19 @@ class RateLimitClient:
                     if "rate limit" in body.lower():
                         reset = int(e.headers.get("X-RateLimit-Reset", 0) or 0)
                         wait = max(reset - int(time.time()) + 2, 30)
-                        print(f"[gate3] 403 rate-limited — sleeping {wait}s", flush=True)
+                        log(f"403 rate-limited — sleeping {wait}s")
                         time.sleep(wait)
                         continue
                     raise
                 if e.code in (429, 500, 502, 503, 504):
                     wait = min(2 ** attempt * 2, 60)
-                    print(f"[gate3] HTTP {e.code} — retry in {wait}s", flush=True)
+                    log(f"HTTP {e.code} — retry in {wait}s")
                     time.sleep(wait)
                     continue
                 raise
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 wait = min(2 ** attempt * 2, 60)
-                print(f"[gate3] network error — retry in {wait}s", flush=True)
+                log(f"network error — retry in {wait}s")
                 time.sleep(wait)
         raise RuntimeError(f"gave up after {retries} retries: {url}")
 
@@ -295,8 +315,30 @@ def verify_pr_list(prs, client, org_repo, report):
     report["notes"].append("PR list compare done")
 
 
-def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs, progress_every):
-    """Per-PR reviews + comment count. Resumable via state file."""
+def bb_top_comments(rest, pid):
+    """Top-level PR comments from the scrape activities (COMMENT:ADDED with a
+    comment that has no anchor/path → pure PR comment). Returns list of
+    normalized bodies in creation order."""
+    p = rest / f"pr_{pid}_activities.json"
+    if not p.exists():
+        return []
+    acts = json.loads(p.read_text())
+    bodies = []
+    for a in acts:
+        if a.get("action") != "COMMENTED":
+            continue
+        c = a.get("comment") or {}
+        if not c.get("text"):
+            continue
+        if (c.get("anchor") or {}).get("path"):
+            continue            # inline/file-level, not a PR body comment
+        bodies.append(norm_comment(c.get("text")))
+    return bodies
+
+
+def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
+                   progress_every, rest):
+    """Per-PR reviews + comment body compare. Resumable via state file."""
     done = set()
     if state_path and os.path.exists(state_path):
         try:
@@ -323,11 +365,27 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs, progres
             report["notes"].append(
                 f"PR {n}: reviewer set differs BB={sorted(bb_set)} GH={sorted(gh_set)} "
                 f"(mannequin mapping is expected to differ)")
+
+        # comment bodies: every BB top-level PR comment should appear (normalized)
+        # in some GH issue comment (GH flattens threads + applies markdown).
+        bb_bodies = bb_top_comments(rest, n)
+        gh_bodies = [norm_comment(c.get("body")) for c in comments]
+        missing = []
+        for b in bb_bodies:
+            if not any(norm_comment(b) in g or g in norm_comment(b) for g in gh_bodies):
+                missing.append(b[:120])
+        if missing:
+            report["notes"].append(f"PR {n}: {len(missing)} BB comment(s) not found on GH")
+            for m in missing[:5]:
+                report["notes"].append(f"   missing: {m!r}")
+
         report["deep"].append({
             "pr": n,
             "bb_reviewers": bb_rev,
             "gh_reviewers": gh_rev,
+            "bb_comment_count": len(bb_bodies),
             "gh_comment_count": len(comments),
+            "gh_comment_missing": len(missing),
             "gh_review_count": len(reviews),
         })
         done.add(n)
@@ -335,10 +393,8 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs, progres
             json.dump({"deep_done": sorted(done)},
                       open(state_path, "w"))
         if i % progress_every == 0 or i == total:
-            now = time.strftime("%H:%M:%S")
             pct = 100.0 * i / total if total else 100.0
-            print(f"[gate3] deep {i}/{total} ({pct:.0f}%) [{now}] "
-                  f"remaining={client.remaining}", flush=True)
+            log(f"deep {i}/{total} ({pct:.0f}%) remaining={client.remaining}")
 
 
 def main():
@@ -357,15 +413,15 @@ def main():
     ap.add_argument("--progress-every", type=int, default=100)
     args = ap.parse_args()
     if not args.pat:
-        print("--pat or GH_PAT required"); return 2
+        log("--pat or GH_PAT required"); return 2
 
     index, prs, branches, tags, rest = load_scrape(args.scrape)
     report = {"notes": [], "genuine": [], "deep": []}
     client = RateLimitClient(args.pat)
     org_repo = f"{args.org}/{args.repo}"
-    print(f"[gate3] BB: {index['project']}/{index['repo']} ({len(prs)} PRs, "
-          f"{len(branches)} branches, {len(tags)} tags)")
-    print(f"[gate3] GH: {org_repo}")
+    log(f"BB: {index['project']}/{index['repo']} ({len(prs)} PRs, "
+        f"{len(branches)} branches, {len(tags)} tags)")
+    log(f"GH: {org_repo}")
 
     # --- git layer -------------------------------------------------------
     scrape_git = Path(args.scrape) / "git"
@@ -377,26 +433,26 @@ def main():
     verify_pr_list(prs, client, org_repo, report)
     if args.deep:
         verify_pr_deep(prs, client, org_repo, report, args.state,
-                       args.limit_prs, args.progress_every)
+                       args.limit_prs, args.progress_every, rest)
 
     # --- summary ----------------------------------------------------------
-    print("\n=== GATE 3 ===")
+    log("=== GATE 3 ===")
     for n in report["notes"]:
-        print("  [note]", n)
+        log("  [note] " + n)
     for d in report["deep"][:50]:
-        print("  [deep]", json.dumps(d))
+        log("  [deep] " + json.dumps(d))
     if len(report["deep"]) > 50:
-        print(f"  ... {len(report['deep'])} deep records (first 50 shown; "
-              f"state saved for resume)")
+        log(f"  ... {len(report['deep'])} deep records (first 50 shown; "
+            f"state saved for resume)")
     if report["genuine"]:
-        print(f"  GENUINE ({len(report['genuine'])}):")
+        log(f"  GENUINE ({len(report['genuine'])}):")
         for g in report["genuine"][:50]:
-            print("   ", g)
+            log("   " + g)
         if len(report["genuine"]) > 50:
-            print(f"   ... and {len(report['genuine'])-50} more")
-        print("GATE 3: FAIL")
+            log(f"   ... and {len(report['genuine'])-50} more")
+        log("GATE 3: FAIL")
         return 1
-    print("GATE 3: PASS")
+    log("GATE 3: PASS")
     return 0
 
 
