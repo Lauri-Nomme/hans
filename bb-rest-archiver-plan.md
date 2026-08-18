@@ -198,14 +198,18 @@ Phase 3 complete:
       No genuine differences. Benign, documented divergences only:
       inner-tar mtimes/mode-type-bits, `rescopedTimestamp` internal target-advance
       refresh, real-only `ACTIVITY/UPDATED` for title/desc edits (REST cannot expose),
-      `allParticipants` order (DB position).
+      `allParticipants` order (DB position), `nodeId`/`instanceName` (instance
+      specific). **Explicit task-fidelity check**: severity-BLOCKER comments
+      (id/severity/state/resolvedTimestamp/resolverId) must match; corpus now has a
+      resolved task (PR1) + open task (PR4).
 - [x] **Gate 2 — round-trip import (PASS)**: `corpus/gate2.py` — imports the synth
       archive into bb-lab-b, scapes both lab instances, and scripted-diffs:
       PR state/title/refs/reviewers/participants (slug-keyed), activities, BRANCHES,
       TAGS, and git OBJECT-WISE (54 objects identical set+content via
-      `git cat-file`). Users import as stub accounts (displayName=slug, active=false,
-      no email) — expected Bitbucket behavior; git author emails are the only email
-      fidelity. Commit-level comments correctly absent (mirrors real export).
+      `git cat-file`). **Task check**: BLOCKER comments survive with severity/state/
+      resolvedDate/resolver. Users import as stub accounts (displayName=slug,
+      active=false, no email) — expected Bitbucket behavior; git author emails are the
+      only email fidelity. Commit-level comments correctly absent (mirrors real export).
       Reproduced with `corpus/gate2.py scrape_a scrape_b`.
 - [x] **Gate 2B — round-trip through the OFFICIAL exporter (PASS)**: `corpus/gate2b.py`
       re-exports bb-lab-b with `POST /rest/api/1.0/migration/exports` and compares the
@@ -214,8 +218,10 @@ Phase 3 complete:
       identical; metadata/permissions/lfs equal after normalizing instance ids, nodeId,
       stub-user identities (`slug|displayName||type`→slug) and reallocated comment ids;
       the only genuine diff is the title/desc-edit `ACTIVITY/UPDATED` events (lost
-      through the archive→import→export path because REST hides them). Run with default
-      args against bb-lab-b (needs `sudo nerdctl`).
+      through the archive→import→export path because REST hides them). **Task check**:
+      BLOCKER comments reproduce exactly through the official re-export. Run with
+      default args against bb-lab-b (needs `sudo nerdctl`). NOTE: repo ids are
+      instance-specific (A=2, B=1 on the current lab) — pass `--repo-id-real/--repo-id-syn`.
 - [ ] **Gate 3 — end-to-end GEI**: `gh bbs2gh migrate-repo --archive-path` +
       mannequin reclaim. Requires a throwaway Enterprise trial org; not yet run.
 
