@@ -12,6 +12,13 @@ deliberately NOT fetched here — the mirror + the activity stream (which embeds
 full comment objects) cover them. (The corpus tool `corpus/capture.py` fetches
 the extra dumps for supervision; the production scraper does not.)
 
+Branches and tags ARE also present in the git mirror (refs/heads/*, refs/tags/*),
+but we fetch them via REST too: they are a single paginated call each (negligible
+vs per-PR activities), and the tags dump carries the annotated-vs-lightweight
+distinction (`hash` for the tag object vs `latestCommit` for the peeled commit)
+that the archive's refs/tags/* files require. The real scale cost — and the part
+that is genuinely REST-only — is the per-PR activity stream.
+
 Scalable: paginated everywhere, rate-limit aware (honors X-RateLimit-*),
 retry/backoff, and resumable via a checkpoint file (completed PR ids), so a run
 can be interrupted and continued across rate-limit windows.
