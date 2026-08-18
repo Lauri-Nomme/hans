@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""bb-archiver - reconstruct Bitbucket Data Center migration export archives
+from read-only REST API + git mirror clones.
+
+Usage:
+  bb-archiver scrape   --base URL --user U --password P \
+                       --project PRJ --repo r --out ./scrape/r
+  bb-archiver assemble --scrape ./scrape/r --out Bitbucket_export_synth_1.tar
+  bb-archiver validate --archive Bitbucket_export_synth_1.tar
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from bb_archiver.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

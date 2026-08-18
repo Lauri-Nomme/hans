@@ -4,4 +4,4 @@ lab/home/
 # Bitbucket licenses are credentials; never commit them.
 lab/license*.txt
 # Agent memory store.
-.mnemonics/
+.mnemonics/__pycache__/

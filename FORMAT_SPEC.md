@@ -410,10 +410,22 @@ derive archive records from the REST streams using this table, then re-derive
   from the archive; REST has them). Dropped, not migrated. Document, do not synthesize.
 - **Hard-deleted comments** leave no archive trace (verified: PR5's deleted comment
   absent) — matches REST behavior (hard delete).
+- **Title/description-edit `UPDATED` activities are recorded by the real exporter but
+  NOT returned by REST `/activities`** (verified live on 9.4.18: after a PUT title edit,
+  REST still shows only `OPENED`; the archive contains `ACTIVITY/UPDATED` with
+  `createdTimestamp` = edit time, `userId` = editor). A REST-only tool CANNOT recover
+  the exact timestamps; the ar­chive produced by the tool will therefore contain FEWER
+  `UPDATED` records than the real one (a known, benign divergence — GEI reads final
+  title/desc from PR metadata, not activities).
 - PR tasks API absent on 9.4.18 (404) — no tasks in archive.
 - Branch permissions / CI config / LFS blobs — not exported (non-goals; parity).
 - `instance-details.nodeId` (job node) and all mtimes are export-time artifacts —
   benign Gate-1 diff noise.
+- Inner tar entry mtimes (git metadata, caches, objects) = export mtime; mode 0644
+  (objects 0400). Gate-1 normalizes these.
+- `allParticipants` array order is an internal DB position order, NOT derivable from
+  REST (REST returns separate `author`/`reviewers`/`participants` lists). Compare as a
+  SET in Gate-1.
 
 ## 9. Phase 4 implementation notes (from this spec)
 
