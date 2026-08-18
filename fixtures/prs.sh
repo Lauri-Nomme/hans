@@ -82,14 +82,15 @@ api PUT "$R/pull-requests/$PR1_ID" "$(py_json "{
   'description': 'Implements the **login screen** 🚀 with email login.\\n\\nMentions @grace.\\n\\nUnicode: ünïcödé 漢字 🎉' }")" >/dev/null
 log "PR1: title+description edited"
 
-# task anchored to the reply comment (tasks API 404s on 9.4.18 -> [HYPOTHESIS] skip)
-if api POST "$R/pull-requests/$PR1_ID/tasks" \
-    "$(py_json "{'anchor': {'id': $REPLY_ID}, 'text': 'add unit tests for validate()'}")" \
-    >/dev/null 2>&1; then
-  log "PR1: task created"
-else
-  log "PR1: tasks API returns 404 on 9.4.18 ([HYPOTHESIS] gap, not in corpus)"
-fi
+# tasks = comments with severity BLOCKER (verified 9.4.18). Create one then
+# resolve it -> REST exposes state, resolvedDate, resolver; export's comment
+# carries resolvedTimestamp/resolverId too.
+TASK_ID="$(api POST "$R/pull-requests/$PR1_ID/comments" \
+  "$(py_json "{'text': 'add unit tests for validate()', 'severity': 'BLOCKER'}")" | jq -r '.id')"
+log "PR1: task comment $TASK_ID created (severity BLOCKER, state OPEN)"
+api PUT "$R/pull-requests/$PR1_ID/comments/$TASK_ID" \
+  "$(py_json "{'version': 0, 'text': 'add unit tests for validate()', 'severity': 'BLOCKER', 'state': 'RESOLVED'}")" >/dev/null
+log "PR1: task $TASK_ID resolved"
 
 # ------------------------------- PR 2: MERGED (ff) ---------------------------
 PR2_BRANCH=hotfix/critical

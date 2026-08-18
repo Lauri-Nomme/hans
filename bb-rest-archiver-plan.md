@@ -255,8 +255,10 @@ Phase 3 complete:
 7. Reviewer-state model: Bitbucket resets approvals/NEEDS_WORK on ANY PR mutation (push,
    target advance, title edit) and a drift processor re-anchors inline comments async — the
    exporter must read final participant state + full activity log, not assume consistency.
-8. PR tasks API is absent on 9.4.18 (404) — if production exposes it, re-open the fixture;
-   otherwise tasks are out of scope.
+8. PR tasks: there is NO `/tasks` REST endpoint on 9.4.18 (the earlier "tasks 404"
+   finding), BUT tasks exist as `severity:"BLOCKER"` comments (verified live). The
+   exporter round-trips them (REST `resolvedDate`/`resolver` -> archive
+   `resolvedTimestamp`/`resolverId`). Fixture PR1 now creates + resolves a task.
 9. Deleted comments: REST delete is hard (no activity trace) — the exporter can only observe
    what remains; confirmed the real exporter also drops them.
 

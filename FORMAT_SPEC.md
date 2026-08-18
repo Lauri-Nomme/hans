@@ -238,7 +238,10 @@ Record schemas (all alphabetical keys, all carry `createdTimestamp` + `userId`):
     "authorId" : "...",
     "comments" : [ /* nested replies, recursively same comment schema */ ],
     "createdTimestamp" : ..., "id" : "117",
-    "severity" : "NORMAL", "state" : "OPEN",
+    "resolvedTimestamp" : ...,   /* tasks only (severity BLOCKER, state RESOLVED) */
+    "resolverId" : "...",        /* tasks only */
+    "severity" : "NORMAL",       /* NORMAL | BLOCKER (task) */
+    "state" : "OPEN",            /* OPEN | RESOLVED */
     "text" : "...",
     "thread" : {
       "anchor" : { ... },               /* inline/file-level only */
@@ -248,10 +251,18 @@ Record schemas (all alphabetical keys, all carry `createdTimestamp` + `userId`):
   }
 }
 ```
-- Comment `id` is a **string**. `severity` = `NORMAL`. `state` = `OPEN`/`RESOLVED`.
+- Comment `id` is a **string**. `state` = `OPEN`/`RESOLVED`.
+- **Tasks are comments with `severity: "BLOCKER"`** (verified on 9.4.18; there is NO
+  `/tasks` REST endpoint on this build). REST comment carries `state`, `resolvedDate`,
+  `resolver` for resolved tasks; the archive carries `resolvedTimestamp` +
+  `resolverId` (userId string) instead. Map: `resolvedDate`→`resolvedTimestamp`,
+  `resolver.slug`→`resolverId`, `state` passthrough. PR `properties.openTaskCount` /
+  `resolvedTaskCount` (REST) are NOT stored in the archive — they are derived
+  server-side; only the comments themselves encode tasks.
 - Replies are **nested** under `comments[]`, not flattened.
 - Top-level comments: `thread` has **no `anchor`**.
-- Thread `resolved` reflects resolution state.
+- Thread `resolved` reflects thread resolution (NOT task resolution — a resolved
+  task can still have `thread.resolved:false`).
 
 **Inline/file-level anchor** (`thread.anchor`, alphabetical keys):
 ```json
@@ -410,6 +421,10 @@ derive archive records from the REST streams using this table, then re-derive
   from the archive; REST has them). Dropped, not migrated. Document, do not synthesize.
 - **Hard-deleted comments** leave no archive trace (verified: PR5's deleted comment
   absent) — matches REST behavior (hard delete).
+- **Tasks ARE migrated** as `severity:"BLOCKER"` comments (there is no `/tasks` REST
+  endpoint on 9.4.18; the earlier "tasks 404" finding was correct about the endpoint,
+  but tasks exist as BLOCKER-severity comments). Open tasks have `state:OPEN`; resolved
+  tasks add `resolvedTimestamp`/`resolverId`.
 - **Title/description-edit `UPDATED` activities are recorded by the real exporter but
   NOT returned by REST `/activities`** (verified live on 9.4.18: after a PUT title edit,
   REST still shows only `OPENED`; the archive contains `ACTIVITY/UPDATED` with
@@ -417,7 +432,9 @@ derive archive records from the REST streams using this table, then re-derive
   the exact timestamps; the ar­chive produced by the tool will therefore contain FEWER
   `UPDATED` records than the real one (a known, benign divergence — GEI reads final
   title/desc from PR metadata, not activities).
-- PR tasks API absent on 9.4.18 (404) — no tasks in archive.
+- PR tasks: there is NO `/tasks` REST endpoint on 9.4.18 (the earlier "tasks 404"
+  finding was about the endpoint) — but tasks DO migrate as `severity:"BLOCKER"`
+  comments, which the tool reproduces (see §6.6).
 - Branch permissions / CI config / LFS blobs — not exported (non-goals; parity).
 - `instance-details.nodeId` (job node) and all mtimes are export-time artifacts —
   benign Gate-1 diff noise.

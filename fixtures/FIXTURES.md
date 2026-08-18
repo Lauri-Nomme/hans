@@ -49,6 +49,13 @@ Verified live API facts (9.4.18) that shape the corpus:
     FORMAT_SPEC.md §6.6/6.7 documents the observed behavior.
 - Merging does **NOT** auto-delete the source branch (`KNOWN-BAD` case to study in
   the real export).
+- **Tasks are comments with `severity: "BLOCKER"`** on 9.4.18. There is NO
+  `POST /pull-requests/{id}/tasks` endpoint (404 — the old `[HYPOTHESIS]` gap is now
+  resolved). Create a task = `POST /comments` with `{"severity":"BLOCKER",...}`;
+  resolve = `PUT /comments/{id}` with `state:"RESOLVED"`. REST comment exposes
+  `state`, `resolvedDate`, `resolver`; the export comment carries `resolvedTimestamp`
+  + `resolverId` instead. PR `properties.openTaskCount`/`resolvedTaskCount` are
+  REST-only (not in the archive).
 - Annotated-tag tagger = git `user`/`email` at tag creation (set via
   `git -c user.name=... -c user.email=...`), not the pushing user.
 

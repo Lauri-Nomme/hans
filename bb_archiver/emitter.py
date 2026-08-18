@@ -190,6 +190,11 @@ class Emitter:
         c["comments"] = [self._comment(r, top=False) for r in comment.get("comments") or []]
         c["createdTimestamp"] = comment["createdDate"]
         c["id"] = str(comment["id"])
+        if comment.get("resolvedDate") is not None:
+            c["resolvedTimestamp"] = comment["resolvedDate"]
+        resolver = comment.get("resolver")
+        if isinstance(resolver, dict) and resolver.get("slug"):
+            c["resolverId"] = self.m.ref_id_for(resolver["slug"])
         c["severity"] = comment.get("severity", "NORMAL")
         c["state"] = comment.get("state", "OPEN")
         c["text"] = comment.get("text") or ""
