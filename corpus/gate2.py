@@ -115,6 +115,70 @@ def check_activities(A, B):
     return fails
 
 
+def check_refs(A, B):
+    """Branches + tags (id, latestCommit, hash for annotated tags) from the scrapes."""
+    fails = 0
+    for kind in ("branches", "tags"):
+        ra = load(A, f"{kind}_{'FIX'}_golden")
+        rb = load(B, f"{kind}_{'FIX'}_golden")
+        if ra is None or rb is None:
+            print(f"{kind}: missing on one side"); fails += 1; continue
+        def sig(items):
+            return sorted({(x.get("id"), x.get("latestCommit"), x.get("hash"))
+                           for x in (items or [])})
+        sa, sb = sig(ra), sig(rb)
+        if sa != sb:
+            fails += 1
+            print(f"{kind}: DIFF")
+            for x in sa:
+                if x not in sb: print("   A-only:", x)
+            for x in sb:
+                if x not in sa: print("   B-only:", x)
+        else:
+            print(f"{kind}: match ({len(sa)})")
+    return fails
+
+
+def _git_objects(gitdir):
+    """sha -> (type, raw bytes) for every object in a bare repo."""
+    import subprocess
+    git = lambda *a: subprocess.run(["git", "-C", gitdir, *a],
+                                    capture_output=True, check=True)
+    out = git("cat-file", "--batch-all-objects",
+              "--batch-check=%(objectname) %(objecttype)").stdout.decode()
+    objs = {}
+    for line in out.splitlines():
+        sha, typ = line.split()
+        raw = git("cat-file", typ, sha).stdout
+        objs[sha] = (typ, raw)
+    return objs
+
+
+def check_git_objects(A, B):
+    """Object-wise git repo comparison via the scraped mirrors
+    (`git cat-file`, per the plan — not byte-level tar compare)."""
+    import subprocess
+    ga, gb = f"{A}/git", f"{B}/git"
+    for g in (ga, gb):
+        if not (subprocess.run(["git", "-C", g, "rev-parse", "--is-bare-repository"],
+                               capture_output=True).returncode == 0):
+            print(f"git mirror missing at {g}")
+            return 1
+    ma, mb = _git_objects(ga), _git_objects(gb)
+    ka, kb = set(ma), set(mb)
+    if ka != kb:
+        print(f"git objects: set differ (A={len(ka)} B={len(kb)})")
+        print("   A-only:", sorted(ka - kb)[:5])
+        print("   B-only:", sorted(kb - ka)[:5])
+        return 1
+    diffs = [sha for sha in ka if ma[sha] != mb[sha]]
+    if diffs:
+        print(f"git objects: {len(diffs)} content diffs: {sorted(diffs)[:5]}")
+        return 1
+    print(f"git objects: {len(ka)} objects identical (set + content)")
+    return 0
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -124,6 +188,8 @@ def main():
     f = 0
     f += check_prs(args.scrape_a, args.scrape_b)
     f += check_activities(args.scrape_a, args.scrape_b)
+    f += check_refs(args.scrape_a, args.scrape_b)
+    f += check_git_objects(args.scrape_a, args.scrape_b)
     print("GATE 2:", "PASS" if f == 0 else f"FAIL ({f})")
     return 0 if f == 0 else 1
 
