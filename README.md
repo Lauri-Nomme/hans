@@ -92,29 +92,108 @@ bb-archiver validate  -> schema self-check of the tar
   with the *official* admin endpoint and compares against the golden export,
   surfacing everything the official path preserves that REST cannot see.
   **PASS** — only genuine diff is title/description-edit `ACTIVITY/UPDATED`.
-- **Gate 3 — end-to-end GEI**: `gh bbs2gh migrate-repo --archive-path` +
-  mannequin reclaim. **NOT YET RUN** — needs a throwaway Enterprise trial org.
+- **Gate 3 — end-to-end GEI**: `corpus/gate3.py` — the lab's synthetic archive
+  was accepted by `gh bbs2gh migrate-repo --archive-path` into the `unapplicable`
+  Enterprise-trial org and migrated with **byte-identical git SHAs**, correct PR
+  states/merge flags, branches, tags, review states, comment bodies, and author
+  identities. **PASS**. (No special "migrate" PAT scope exists; the requirement
+  is an Enterprise org + `repo`/`read:org` or `admin:org`/`workflow` token.)
 
-## Usage
+## Usage — the whole procedure
+
+Requirements: Python 3.10+ with `requests`, and a `git` binary. `bb-archiver`
+is a thin wrapper that loads `bb_archiver/` from the repo root.
+
+Sources and destinations:
+
+| Thing | What you need |
+|---|---|
+| Bitbucket source | a normal (non-admin) user's basic-auth or PAT with **repo read** |
+| GitHub destination | an **Enterprise-plan org** where you are owner or hold the **migrator role** |
+| GitHub PAT (`GH_PAT`) | classic token, scopes `repo`, `read:org` (or `admin:org`), `workflow` |
+
+### Step 1 — scrape the Bitbucket repo (read-only)
 
 ```bash
-# 1. Scrape a repo (read-only PAT / basic auth against a normal user)
-bb-archiver scrape --base http://bitbucket.example.com \
-    --user readonly --password "$TOKEN" \
-    --project PRJ --repo r --out ./scrape/r
-
-# 2. Assemble the migration archive
-bb-archiver assemble --scrape ./scrape/r --out Bitbucket_export_synth_1.tar
-
-# 3. Self-check the archive
-bb-archiver validate --archive Bitbucket_export_synth_1.tar
-
-# 4. Migrate (Gate 3)
-gh bbs2gh migrate-repo --archive-path Bitbucket_export_synth_1.tar ...
+bb-archiver scrape --base https://bb.example.com \
+    --user readonly --password "$PASSWORD" \
+    --project PRJ --repo my-repo \
+    --out ./scrape/my-repo
 ```
 
-Requires Python 3 + `requests` and a `git` binary. `bb-archiver` is a thin
-wrapper script that loads `bb_archiver` from the repo root.
+Produces `./scrape/my-repo/`:
+- `rest/*.json` — raw dumps of project/repo/branches/tags, every PR
+  (metadata, activities, diff, commits, per-path comments), every commit
+  (detail, changes, comments)
+- `git/` — a bare mirror including `refs/heads/*`, `refs/tags/*`,
+  `refs/pull-requests/*`, `refs/stash-refs/*` (the mirror is what carries the
+  git author/committer emails that make GitHub attribution work)
+- `index.json` — ids + entity manifest
+
+Add `--no-git` if you want the REST part only.
+
+### Step 2 — assemble the migration archive
+
+```bash
+bb-archiver assemble --scrape ./scrape/my-repo \
+    --out Bitbucket_export_synth_1.tar
+```
+
+Full options: `--app-version 9.4.18 --build-version 9004018`,
+`--instance-name` (target display name), `--node-id`, `--mtime` (defaults to
+export-determined values; only override for byte-reproducibility).
+
+### Step 3 — self-check the archive
+
+```bash
+bb-archiver validate --archive Bitbucket_export_synth_1.tar
+```
+
+Checks tar structure + gzip headers against `FORMAT_SPEC.md`.
+
+### Step 4 — migrate with GitHub Enterprise Importer
+
+Set the GitHub PAT, then:
+
+```bash
+export GH_PAT='ghp_...'
+gh bbs2gh migrate-repo \
+    --github-org ORG --github-repo my-repo \
+    --archive-path Bitbucket_export_synth_1.tar \
+    --use-github-storage \
+    --target-repo-visibility private \
+    --bbs-server-url https://bb.example.com --bbs-project PRJ --bbs-repo my-repo
+```
+
+Notes on the flags:
+- `--archive-path` uploads our locally-built archive — the `--bbs-*` flags are
+  still *required* by the CLI but are not used for fetching (no
+  `--bbs-username/password` with `--archive-path`).
+- There is no "migrate" PAT scope; the required scopes are `repo`,
+  `read:org`/`admin:org`, `workflow`.
+- Add `--queue-only` to queue and continue, then
+  `gh bbs2gh wait-for-migration --migration-id RM_...` to block on it.
+
+### Step 5 — verify the migration (Gate 3)
+
+`corpus/gate3.py` validates the migrated GitHub repo against the scrape output
+of the same Bitbucket repo — designed for 10k PRs / 100k commits:
+
+```bash
+python3 corpus/gate3.py --scrape ./scrape/my-repo \
+    --org ORG --repo my-repo --pat "$GH_PAT"
+```
+
+- **git layer** — refs (branches/tags SHAs via `git ls-remote` vs the scrape
+  mirror) and optionally full object-wise compare (`git cat-file
+  --batch-all-objects`; add `--no-git-objects` to skip the clone-with-fetch).
+- **PR layer** — paginated list compare (state via `merged_at`, title, head/base).
+- **deep layer** (`--deep`) — per-PR review states and comment-body comparison
+  (BB top-level comments must appear in GH issue comments, thread-flattening
+  aware). Rate-limit-aware, resumable via `--state` file, progress every
+  `--progress-every` PRs.
+- Every output line is ISO-timestamped; the client sleeps on rate limits,
+  retries 429/5xx, caches ETags, and follows `Link:` pagination.
 
 ## Known fidelity gaps
 
@@ -166,8 +245,7 @@ lab/                    scripted two-instance lab bring-up (SEED.md)
 
 - Phases 0–4 complete: lab, fixture corpus, paired capture, format reverse
   engineering, working tool.
-- Phase 5: Gates 1, 2, 2B **PASS**. Gate 3 (end-to-end GEI against a throwaway
-  Enterprise trial org) pending.
+- Phase 5: **Gates 1, 2, 2B, and 3 all PASS** — see the gates section.
 - Phase 6 (production runbook) planned in `bb-rest-archiver-plan.md`.
 
 ## Non-goals
