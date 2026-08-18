@@ -87,6 +87,10 @@ def compare(real_archive, syn_archive, report):
             if ja == jb:
                 report.note(f"{name}: same JSON, differing bytes (serialization)")
                 continue
+            if "instanceDetails" in name and "instance-details" in name:
+                if _norm_instance(ja) == _norm_instance(jb):
+                    report.note(f"{name}: same after instance-details normalization")
+                    continue
             diff = _json_diff(ja, jb, report, jsonpath=name)
         else:
             report.note(f"{name}: raw byte diff (unclassified)")
@@ -96,6 +100,14 @@ def _norm_participants(meta):
     """Return participants as a comparable set (role, userId, status)."""
     return {(p["role"], p["userId"], p["status"])
             for p in meta.get("allParticipants", [])}
+
+
+def _norm_instance(a):
+    """instance-details: nodeId + instanceName are instance-specific (benign)."""
+    a = dict(a)
+    a.pop("nodeId", None)
+    a.pop("instanceName", None)
+    return a
 
 
 def _json_diff(a, b, report, jsonpath, path=""):
@@ -149,6 +161,31 @@ def _act_sig(x):
     return json.dumps(x, sort_keys=True)
 
 
+def check_tasks(real, syn, report):
+    """Tasks are comments with severity=BLOCKER; assert they reproduce with
+    fidelity: id (string), severity, state, resolvedTimestamp/resolverId.
+    `real`/`syn` are {pid: activities-list} dicts."""
+    def task_comments(rows):
+        out = []
+        for a in (rows or []):
+            c = a.get("comment") if isinstance(a, dict) else None
+            if isinstance(c, dict) and c.get("severity") == "BLOCKER":
+                out.append({k: c.get(k) for k in
+                            ("id", "severity", "state", "text",
+                             "resolvedTimestamp", "resolverId")})
+        return out
+    for pid in (1, 2, 3, 4, 5):
+        rtasks = task_comments(real.get(pid))
+        stasks = task_comments(syn.get(pid))
+        rtasks.sort(key=lambda t: t["id"])
+        stasks.sort(key=lambda t: t["id"])
+        if rtasks != stasks:
+            report.fail(f"PR{pid}: task comments differ "
+                        f"real={rtasks} syn={stasks}")
+        elif rtasks:
+            report.note(f"PR{pid}: {len(rtasks)} task(s) reproduced exactly")
+
+
 def _compare_activities(real, syn, report, jsonpath):
     """Compare activity lists as multisets. Real exporter records title/desc-edit
     ACTIVITY/UPDATED events that REST cannot expose -> treat as known gap."""
@@ -197,6 +234,18 @@ def _list_item_diff(x, y, report, jsonpath, itempath):
             report.fail(f"{jsonpath}{itempath}: {x!r} != {y!r}")
 
 
+def load_activities(archive, pid):
+    """Load a PR's activities.json from an export archive (find the repo id)."""
+    import re
+    with tarfile.open(archive) as t:
+        for name in t.getnames():
+            if re.search(rf"pullrequest/{pid}/activities\.json\.atl\.gz$", name):
+                data = t.extractfile(name)
+                if data:
+                    return json.loads(gzip.decompress(data.read()))
+    return None
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -206,6 +255,9 @@ def main():
     args = ap.parse_args()
     r = Report()
     compare(args.real, args.syn, r)
+    real_acts = {pid: load_activities(args.real, pid) for pid in (1, 2, 3, 4, 5)}
+    syn_acts = {pid: load_activities(args.syn, pid) for pid in (1, 2, 3, 4, 5)}
+    check_tasks(real_acts, syn_acts, r)
     print("=== Gate 1 semantic diff ===")
     for n in r.notes:
         print("  [note]", n)

@@ -179,6 +179,33 @@ def check_git_objects(A, B):
     return 0
 
 
+def check_tasks(A, B):
+    """Tasks (severity BLOCKER comments) must survive the round trip with
+    fidelity. Comment ids differ (target reallocates), so compare by task text
+    with severity/state and (for resolved) resolvedDate/resolver slug."""
+    fails = 0
+    for pid in (1, 2, 3, 4, 5):
+        aa, ab = load(A, f"pr_{pid}_activities"), load(B, f"pr_{pid}_activities")
+        if aa is None or ab is None:
+            continue
+        def tasks(acts):
+            out = {}
+            for a in (acts or []):
+                c = a.get("comment") or {}
+                if c.get("severity") == "BLOCKER":
+                    r = (c.get("resolver") or {}).get("slug")
+                    out[c.get("text")] = (c.get("severity"), c.get("state"),
+                                          c.get("resolvedDate"), r)
+            return out
+        ta, tb = tasks(aa), tasks(ab)
+        if ta != tb:
+            fails += 1
+            print(f"PR{pid}: tasks differ A={ta} B={tb}")
+        elif ta:
+            print(f"PR{pid}: {len(ta)} task(s) preserved ({list(ta)})")
+    return fails
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -190,6 +217,7 @@ def main():
     f += check_activities(args.scrape_a, args.scrape_b)
     f += check_refs(args.scrape_a, args.scrape_b)
     f += check_git_objects(args.scrape_a, args.scrape_b)
+    f += check_tasks(args.scrape_a, args.scrape_b)
     print("GATE 2:", "PASS" if f == 0 else f"FAIL ({f})")
     return 0 if f == 0 else 1
 

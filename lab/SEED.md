@@ -103,16 +103,15 @@ home dir, so re-runs never re-trigger setup.
 - [x] Export dir inside each container (created lazily):
       `<BITBUCKET_HOME>/shared/data/migration/export/` →
       `lab/home/bb-lab-a/shared/data/migration/export/` (and `.../bb-lab-b/`).
-- [x] `trial3h.txt` **IS accepted** by Bitbucket (verified: `POST
-      /rest/api/1.0/admin/license` → HTTP 200, DC subscription license, 10
-      users). Caveats: (a) it is a license-encoder test artifact
-      (`Organisation=Developer Test License`, `SEN=SEN-500`) with expiry
-      2026-08-18 20:02 UTC — treat it as a short-lived lab license, not
-      production; (b) it MUST be submitted via a JSON body or
-      `--data-urlencode` — it contains `+` chars which `curl -d` form-encoding
-      silently turns into spaces, producing "The provided license is not valid
-      and cannot be used." in the wizard. The wizard rejection was a
-      submission bug, not a license problem.
+- [x] **Lab re-create renews the 3h trial window**: `PURGE=1 ./lab/lab-down.sh`
+      (with `sudo` for the container-owned home dirs) then `LAB_LICENSE_FILE=.../trial3h.txt
+      ./lab/lab-up.sh` gives a fresh 3h license. On this build `setup.*` in
+      `bitbucket.properties` was NOT honored on first boot (wizard stuck at the
+      `database` step) — drive the wizard manually with `--data-urlencode license=...`
+      (see below), NOT `-d`, because the license contains `+` chars that `curl -d`
+      turns into spaces (wizard then rejects it). Steps: database → settings
+      (license-type=true, license) → user → jira(skip). Container B must be started
+      manually after A (lab-up.sh aborts if A times out before starting B).
 - [x] **Unlicensed mode does NOT unlock git pushes**: `git push` fails with
       "License limit exceeded / No license has been configured. Pushing has
       been disabled until the license is brought back into compliance." So

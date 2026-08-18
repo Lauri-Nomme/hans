@@ -240,19 +240,10 @@ api PUT "$R/pull-requests/$PR4_ID/participants/alan" \
   "$(py_json "{'user': {'name': 'alan'}, 'approved': False, 'status': 'NEEDS_WORK'}")" "alan:alan-pw-123" >/dev/null
 log "PR4: alan set NEEDS_WORK"
 
-# task + resolve a task (tasks API 404s on 9.4.18 -> [HYPOTHESIS] skip)
-if TASK_ID="$(api POST "$R/pull-requests/$PR4_ID/tasks" \
-    "$(py_json "{'anchor': {'id': $ORPHAN_ID}, 'text': 'verify orphaned-anchor handling'}")" \
-    2>/dev/null | jq -r '.id // empty' 2>/dev/null)"; then
-  if [[ -n "$TASK_ID" ]]; then
-    api PUT "$R/pull-requests/$PR4_ID/tasks/$TASK_ID" "$(py_json "{'state': 'RESOLVED'}")" >/dev/null
-    log "PR4: task $TASK_ID created + resolved"
-  else
-    log "PR4: tasks API returns 404 on 9.4.18 ([HYPOTHESIS] gap, not in corpus)"
-  fi
-else
-  log "PR4: tasks API returns 404 on 9.4.18 ([HYPOTHESIS] gap, not in corpus)"
-fi
+# PR4: open task (severity BLOCKER, left OPEN) — anchored variant on explore.md
+api POST "$R/pull-requests/$PR4_ID/comments" \
+  "$(py_json "{'text': 'verify orphaned-anchor handling', 'severity': 'BLOCKER', 'anchor': {'path': 'explore.md'}}")" >/dev/null
+log "PR4: open task created (severity BLOCKER, state OPEN)"
 
 # ------------------------------- PR 5: DECLINED ------------------------------
 PR5_BRANCH=feature/declined

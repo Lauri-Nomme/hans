@@ -85,10 +85,10 @@ C3b feat: add explore placeholder page                    (alan)  <- main tip
 
 | PR | branch → main | state | REST representation to reconstruct |
 |----|--------------|-------|-------------------------------------|
-| 1  | feature/login | MERGED (merge_commit) | reviewers added+removed (alan), approvals grace+alan (author ada cannot), top-level comment + reply + edit, inline ADDED + file-level comments, title/desc edit (UPDATED), merge commit |
+| 1  | feature/login | MERGED (merge_commit) | reviewers added+removed (alan), approvals grace+alan (author ada cannot), top-level comment + reply + edit, inline ADDED + file-level comments, title/desc edit (UPDATED), merge commit, **resolved task (BLOCKER)** |
 | 2  | hotfix/critical | MERGED (ff → merge commit) | reviewer grace; "ff" strategy yields a merge commit on 9.4.18 (`ae33424`), NOT a fast-forward |
 | 3  | experiment/squash | MERGED (squash) | squash = merge commit with branch tip as 2nd parent (`72fad40`/`6a304a6`) |
-| 4  | feature/explore | OPEN (RESCOPED) | inline ADDED/REMOVED/CONTEXT/file-level comments, force-push RESCOPED, drift-re-anchored added-line comment, title edit after push, grace approve→withdraw→re-approve, alan NEEDS_WORK |
+| 4  | feature/explore | OPEN (RESCOPED) | inline ADDED/REMOVED/CONTEXT/file-level comments, force-push RESCOPED, drift-re-anchored added-line comment, title edit after push, grace approve→withdraw→re-approve, alan NEEDS_WORK, **open task (BLOCKER)** |
 | 5  | feature/declined | DECLINED | ada approve + comment + withdraw, hard-deleted comment, decline activity |
 
 - Commit-level comment on C2 (anchored to src/util.py) — observe whether/how the

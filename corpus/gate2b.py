@@ -84,6 +84,8 @@ def norm_json(obj, is_repo_meta=False, is_pr_meta=False, is_activities=False):
             # instance details: nodeId is machine-specific
             if k == "nodeId":
                 continue
+            if k == "instanceName":
+                continue
             # repository metadata: id/PROJECT id is machine-specific
             if is_repo_meta and k in ("id", "projectId"):
                 out[k] = "<ID>"
@@ -263,6 +265,36 @@ def _diff_activities(rn, sn, where, genuine, notes):
         genuine.append(f"   syn-only:  {json.dumps(s)[:160]}")
 
 
+def check_tasks_exports(real_root, syn_root, repo_id_real, repo_id_syn, notes, genuine):
+    """Tasks (severity BLOCKER comments) through the official round-trip re-export.
+    Comment ids and userIds are normalized; compare by text with severity/state +
+    resolvedTimestamp/resolverId (resolver normalized to slug)."""
+    def tasks(root, rid):
+        out = {}
+        for dirpath, _dn, files in os.walk(root):
+            for f in files:
+                if f != "activities.json.atl.gz":
+                    continue
+                data = gzip.decompress((Path(dirpath) / f).read_bytes())
+                for a in json.loads(data):
+                    c = a.get("comment") or {}
+                    if c.get("severity") == "BLOCKER":
+                        rid_ok = norm_user_id(c.get("resolverId")) or None
+                        out.setdefault((c.get("text"),), []).append({
+                            "severity": c.get("severity"),
+                            "state": c.get("state"),
+                            "resolvedTimestamp": c.get("resolvedTimestamp"),
+                            "resolver": rid_ok,
+                        })
+        return out
+    tr, ts = tasks(real_root, repo_id_real), tasks(syn_root, repo_id_syn)
+    for key in set(tr) | set(ts):
+        if tr.get(key) != ts.get(key):
+            genuine.append(f"task {key}: real={tr.get(key)} syn={ts.get(key)}")
+        elif tr.get(key):
+            notes.append(f"task {key}: reproduced exactly ({tr[key]})")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--golden", default="ground-truth/export-a",
@@ -290,6 +322,8 @@ def main():
     real_root = Path(args.golden)
     notes, genuine = compare(real_root, syn_root,
                              args.repo_id_real, args.repo_id_syn, args.node_id)
+    check_tasks_exports(real_root, syn_root, args.repo_id_real, args.repo_id_syn,
+                        notes, genuine)
     print("=== GATE 2B ===")
     for n in notes:
         print("  [note]", n)

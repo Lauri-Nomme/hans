@@ -204,7 +204,9 @@ class Emitter:
         return c
 
     def _comment_events(self, comment):
-        """Emit COMMENT:OTHER REPLIED/EDITED records for a comment subtree."""
+        """Emit COMMENT:OTHER REPLIED/EDITED records for a comment subtree.
+        EDITED fires when the comment was modified since creation (version>0):
+        text edits bump updatedDate, task resolution sets resolvedDate."""
         events = []
         for reply in comment.get("comments") or []:
             events.append(self._ev("COMMENT:OTHER", reply["createdDate"],
@@ -212,9 +214,11 @@ class Emitter:
                                    {"commentAction": "REPLIED",
                                     "commentId": str(reply["id"])}))
             events.extend(self._comment_events(reply))
-        if (comment.get("updatedDate", comment["createdDate"])
-                != comment["createdDate"]):
-            events.append(self._ev("COMMENT:OTHER", comment["updatedDate"],
+        modified = comment.get("version", 0) > 0 or \
+            (comment.get("updatedDate", comment["createdDate"]) != comment["createdDate"])
+        if modified:
+            ts = comment.get("resolvedDate") or comment.get("updatedDate") or comment["createdDate"]
+            events.append(self._ev("COMMENT:OTHER", ts,
                                    comment["author"]["slug"],
                                    {"commentAction": "EDITED",
                                     "commentId": str(comment["id"])}))
