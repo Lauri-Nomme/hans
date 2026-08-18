@@ -33,6 +33,20 @@ Verified live API facts (9.4.18) that shape the corpus:
   retrievable.
 - Merge strategies `ff`, `squash`, `merge_commit` all accepted. `squash` needs a
   clean merge (we isolate each PR's file changes so they never conflict).
+- **Merge strategy findings on 9.4.18 (verified empirically on a scratch repo
+  ZZ/scratch, then cross-checked against the real export):**
+  - `ff` does **NOT** fast-forward on this build. It produces a **two-parent merge
+    commit** whose tree is identical to the source tip ("content fast-forward recorded
+    as a merge commit"). `MERGED.hash` = that merge commit.
+  - `squash` produces a two-parent merge commit whose second parent is the branch tip;
+    from main's first-parent history the branch appears as one commit.
+  - an unknown strategy value (e.g. `bogus`) is **silently accepted** (HTTP 200) and
+    behaves as `merge_commit`. Strategy does not change the git object shape.
+  - Merge-commit identity: **author = PR author**, **committer = the merger**
+    (admin), message = `Merge pull request #N in KEY/repo from <branch> to <target>\n\nMerged in <branch> (pull request #N)\n\n* commit '<sha>':\n  <2-space-indented first lines>`.
+  - Consequence: the original design's "PR2 = ff, no merge commit" was WRONG — the
+    real export shows PR2 as a merge commit (`ae33424`). FIXTURES.md table updated;
+    FORMAT_SPEC.md §6.6/6.7 documents the observed behavior.
 - Merging does **NOT** auto-delete the source branch (`KNOWN-BAD` case to study in
   the real export).
 - Annotated-tag tagger = git `user`/`email` at tag creation (set via
@@ -65,8 +79,8 @@ C3b feat: add explore placeholder page                    (alan)  <- main tip
 | PR | branch → main | state | REST representation to reconstruct |
 |----|--------------|-------|-------------------------------------|
 | 1  | feature/login | MERGED (merge_commit) | reviewers added+removed (alan), approvals grace+alan (author ada cannot), top-level comment + reply + edit, inline ADDED + file-level comments, title/desc edit (UPDATED), merge commit |
-| 2  | hotfix/critical | MERGED (ff) | fast-forward, no merge commit; reviewer grace |
-| 3  | experiment/squash | MERGED (squash) | single squash commit |
+| 2  | hotfix/critical | MERGED (ff → merge commit) | reviewer grace; "ff" strategy yields a merge commit on 9.4.18 (`ae33424`), NOT a fast-forward |
+| 3  | experiment/squash | MERGED (squash) | squash = merge commit with branch tip as 2nd parent (`72fad40`/`6a304a6`) |
 | 4  | feature/explore | OPEN (RESCOPED) | inline ADDED/REMOVED/CONTEXT/file-level comments, force-push RESCOPED, drift-re-anchored added-line comment, title edit after push, grace approve→withdraw→re-approve, alan NEEDS_WORK |
 | 5  | feature/declined | DECLINED | ada approve + comment + withdraw, hard-deleted comment, decline activity |
 
@@ -90,7 +104,8 @@ For each fixture, the exporter must reproduce from REST dumps:
   `state`, `permittedOperations`): top-level, replies, edits, inline anchors
   (`line`, `lineType` ADDED/REMOVED/CONTEXT, `fileType` TO/FROM, `path`,
   `fromHash`/`toHash`, `diffType` EFFECTIVE/COMMIT, `orphaned`), file-level (path-only anchor).
-- Merge: strategy + resulting commit; ff leaves no merge commit.
+- Merge: strategy + resulting commit; ff leaves no merge commit on this build — the
+  exporter must reproduce the merge-commit regardless of the strategy label.
 - Tags: lightweight (`v1.0`) vs annotated (`v1.1`) — annotated exposes tagger
   + message (object + peeled `^{}`).
 - Branches: which exist after merges (source branch NOT auto-deleted = KNOWN-BAD).

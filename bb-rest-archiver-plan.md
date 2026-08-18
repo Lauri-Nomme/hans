@@ -152,6 +152,26 @@ Produce `FORMAT_SPEC.md`. Method:
 
 Deliverable: `FORMAT_SPEC.md` — the single source of truth for Phase 4.
 
+Phase 3 complete:
+
+- [x] Archive inventory + byte-level hygiene: plain tar, per-file gzip with zeroed MTIME,
+      two serializers (pretty vs compact-alphabetical JSON), no trailing newlines.
+- [x] Version/marker: `archiveVersion: 2`, `version: 9.4.18`, `buildVersion: 9004018`,
+      `nodeId` = export job node. **No checksums/manifest anywhere** — nothing pins JSON bytes.
+- [x] Full field-correspondence tables in `FORMAT_SPEC.md` (project/repo/PR metadata,
+      activities with all `kind` schemas, anchors, permissions, git layout, PR caches).
+- [x] **Merge-strategy reality check (9.4.18, verified live on scratch repo ZZ/scratch):**
+      `ff`/`squash`/`merge_commit`/unknown ALL produce a two-parent merge commit;
+      `ff` is a content-fast-forward recorded as a merge commit; unknown strategies are
+      silently accepted; merge-commit author = PR author, committer = merger. The
+      fixture's "PR2 = ff, no merge commit" claim was wrong — corrected in FIXTURES.md.
+- [x] PR refs: `refs/pull-requests/*/from` only for OPEN PRs; `stash-refs/pull-requests/*/from`
+      for ALL PRs; **no `/merge` refs** in the archive (risk #2 partially resolved — GEI
+      must not need them; still validate in Gate 3).
+- [x] Dropped items confirmed: repo commit-level comments and hard-deleted comments are
+      NOT in the archive; target-only advances bump `rescopedTimestamp` without a RESCOPED
+      activity.
+
 ## Phase 4 — The archiver tool
 
 CLI sketch:
