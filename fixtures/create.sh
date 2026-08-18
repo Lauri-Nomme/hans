@@ -130,8 +130,9 @@ EOF
   git add login.py
   mkcommit "Grace Hopper" "grace@example.com" "Grace Hopper" "grace@example.com" "2024-02-21T15:00:00+00:00" "feat: add login validation"
 
-  # hotfix/critical: C7 (from C1)
-  git branch hotfix/critical "$C1"
+  # hotfix/critical: C7 (from main tip so the PR merge can be a true fast-forward)
+  git checkout -q main
+  git branch hotfix/critical
   git checkout -q hotfix/critical
   mkdir -p src
   cat > src/util.py <<'EOF'
@@ -146,37 +147,33 @@ EOF
   git add src/util.py
   mkcommit "Alan Turing" "alan@example.com" "Alan Turing" "alan@example.com" "2024-03-01T08:00:00+00:00" "fix: sanitize user input in util library"
 
-  # experiment/squash: C8, C9 (from C3 == main tip)
+  # experiment/squash: C8, C9 (from C3b == main tip). Touches a NEW file so it
+  # does not conflict with hotfix/critical's src/util.py change (PR2 + PR3 both merge).
   git checkout -q main
   git branch experiment/squash
   git checkout -q experiment/squash
   mkdir -p src
-  cat > src/util.py <<'EOF'
-"""Core utilities."""
+  cat > src/models.py <<'EOF'
+"""Domain models."""
 
-def add(a, b):
-    return a + b
-
-def total(values):
-    return sum(values)
+class User:
+    def __init__(self, name):
+        self.name = name
 EOF
-  git add src/util.py
+  git add src/models.py
   mkcommit "Ada Lovelace" "ada@example.com" "Ada Lovelace" "ada@example.com" "2024-03-10T09:00:00+00:00" "feat: experimental refactor (wip 1)"
 
-  mkdir -p src
-  cat > src/util.py <<'EOF'
-"""Core utilities."""
+  cat > src/models.py <<'EOF'
+"""Domain models."""
 
-def add(a, b):
-    return a + b
+class User:
+    def __init__(self, name):
+        self.name = name
 
-def total(values):
-    return sum(values)
-
-def average(values):
-    return total(values) / len(values)
+    def __repr__(self):
+        return f"User({self.name})"
 EOF
-  git add src/util.py
+  git add src/models.py
   mkcommit "Grace Hopper" "grace@example.com" "Grace Hopper" "grace@example.com" "2024-03-11T10:00:00+00:00" "feat: experimental refactor (wip 2)"
 
   # feature/explore: C11, C12 (from main tip = C3b)
@@ -234,6 +231,12 @@ EOF
     "+refs/tags/v1.0"
 
   log "git layer pushed (main + 5 feature branches + lightweight tag v1.0)"
+
+  # default branch is NOT auto-set when a repo is created empty via REST;
+  # without it merge-listener errors ("No default branch is defined") occur.
+  api PUT "/rest/api/1.0/projects/$PROJECT_KEY/repos/$REPO_SLUG/default-branch" \
+    "$(py_json "{'id': 'refs/heads/main'}")" >/dev/null
+  log "default branch set to main"
 else
   log "git workdir already present, skipping git layer"
 fi

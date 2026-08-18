@@ -27,6 +27,9 @@ api() {
   local -a args=(-s -u "$cred" -H 'Content-Type: application/json'
     -H 'X-Atlassian-Token: no-check' -X "$method" "$BASE$path")
   [[ -n "$body" ]] && args+=(--data-binary "@$body")
+  if [[ "$method" != "GET" ]]; then
+    args+=(-f)
+  fi
   curl "${args[@]}"
 }
 
@@ -48,8 +51,38 @@ mkcommit() { # author_name author_email committer_name committer_email date msg
 # push_branch <user:pass> <refspec...>
 push_branches() {
   local cred="$1"; shift
-  local url="${GIT_REMOTE/http:\/\//http://$cred@}"
+  local url="$(cred_url "$GIT_REMOTE" "$cred")"
   git push -q "$url" "$@" 2>&1 | sed 's/^/  push: /'
+}
+
+# cred_url <url> <user:pass> -> url with creds embedded
+cred_url() {
+  echo "${1/http:\/\//http://$2@}"
+}
+
+# api_st: like api but writes body to $TMP/body.json and prints only HTTP code
+api_st() {
+  local method="$1" path="$2" body="${3:-}" cred="${4:-$ADMIN}"
+  local -a args=(-s -o "$TMP/body.json" -w "%{http_code}" -u "$cred"
+    -H 'Content-Type: application/json' -H 'X-Atlassian-Token: no-check' -X "$method" "$BASE$path")
+  [[ -n "$body" ]] && args+=(--data-binary "@$body")
+  curl "${args[@]}"
+}
+
+# merge_pr <pr_id> <message> <strategy>: merges, retrying on version-race 409.
+# main advancing (e.g. PR2/PR3 merging) bumps other open PRs' versions async.
+merge_pr() {
+  local id="$1" msg="$2" strat="$3" v code
+  for _ in $(seq 1 10); do
+    v="$(api GET "$R/pull-requests/$id" | jq -r '.version')"
+    code="$(api_st POST "$R/pull-requests/$id/merge" \
+      "$(py_json "{'version': $v, 'message': '$msg', 'strategy': '$strat'}")")"
+    if [[ "$code" == 200 ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 # diff_line <pr_id> <path> <ADDED|REMOVED|CONTEXT> -> one anchor line number
@@ -57,7 +90,7 @@ diff_line() {
   local pr_id="$1" path="$2" type="$3"
   api GET "/rest/api/1.0/projects/$PROJECT_KEY/repos/$REPO_SLUG/pull-requests/$pr_id/diff" > "$TMP/diff.json"
   jq -r --arg p "$path" --arg t "$type" '
-    .diffs[] | select((.destination.path // "") == $p) |
+    .diffs[] | select((.destination.toString // "") == $p) |
     .hunks[].segments[] | select(.type == $t) |
     .lines[] | select(.line != null) |
     if $t == "REMOVED" then .source else .destination end
