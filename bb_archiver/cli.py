@@ -27,6 +27,10 @@ def cmd_assemble(args):
     node_id = None
     if args.node_id:
         node_id = args.node_id
+    if not args.obj_tar_bin:
+        args.obj_tar_bin = _autodetect_obj_tar_bin()
+        if args.obj_tar_bin:
+            _log_archive(f"assemble: using autodetected bb-obj-tar {args.obj_tar_bin}")
     em = Emitter(m, app_version=args.app_version, build_version=args.build_version,
                  instance_name=args.instance_name, node_id=node_id,
                  export_mtime=args.mtime, obj_tar_bin=args.obj_tar_bin,
@@ -34,6 +38,23 @@ def cmd_assemble(args):
     out = em.assemble(args.out)
     n = sum(1 for _ in tarfile.open(out))
     _log_archive(f"archive complete: {n} entries")
+
+
+def _autodetect_obj_tar_bin():
+    """Return the platform-appropriate bb-obj-tar binary from the repo's
+    tools/bb-obj-tar/dist dir if present and executable, else None."""
+    import os
+    names = {
+        "win32": "bb-obj-tar-windows-x86_64.exe",
+        "linux": "bb-obj-tar-linux-x86_64",
+    }.get(sys.platform)
+    if not names:
+        return None
+    dist = Path(__file__).resolve().parent.parent / "tools" / "bb-obj-tar" / "dist"
+    for cand in (dist / names, Path("tools") / "bb-obj-tar" / "dist" / names):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
 
 
 def cmd_validate(args):
