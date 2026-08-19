@@ -169,10 +169,17 @@ def compare(real_root, syn_root, repo_id_real, repo_id_syn, node_id):
         genuine.append("git objects missing on one side")
 
     # --- per-file JSON / raw ----------------------------------------------
+    def _is_bookkeeping(rel):
+        # hierarchy begin/end markers are per-instance bookkeeping: the target
+        # keeps the imported repo's hierarchy id AND assigns its own (e.g.
+        # A=193ff86d, B adds f4753ccd). Compare the repo content, not these.
+        return rel.startswith("_/repository/hierarchy_")
     real_files = {p.relative_to(real_root).as_posix()
-                  for p in real_root.rglob("*") if p.is_file()}
+                  for p in real_root.rglob("*") if p.is_file()
+                  and not _is_bookkeeping(p.relative_to(real_root).as_posix())}
     syn_files = {p.relative_to(syn_root).as_posix()
-                 for p in syn_root.rglob("*") if p.is_file()}
+                 for p in syn_root.rglob("*") if p.is_file()
+                 and not _is_bookkeeping(p.relative_to(syn_root).as_posix())}
     # map syn file -> real file (repo-id path component)
     def map_key(rel):
         return rel.replace(f"repository_{repo_id_syn}", f"repository_{repo_id_real}") \
