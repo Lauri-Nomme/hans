@@ -381,11 +381,14 @@ class Emitter:
         else:
             _log("git objects: bb-obj-tar streaming objects (auto chunks=num_cpus)")
             args = [self.obj_tar_bin, str(gitdir), "--out", str(out_path)]
-        proc = subprocess.run(args, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise RuntimeError(f"bb-obj-tar failed ({proc.returncode}): {proc.stderr}")
-        for line in proc.stdout.splitlines():
-            _log(f"git objects: {line}")
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line:
+                _log(f"git objects: {line}")
+        if proc.wait() != 0:
+            raise RuntimeError(f"bb-obj-tar failed (exit {proc.returncode})")
         return out_path
 
     def _git_objects_python(self, gitdir, out_path):
