@@ -8,10 +8,9 @@ email fidelity in the whole system is inside git author/committer objects. So th
 comparison keys users by slug, not their identity fields.
 """
 import json
+import subprocess
 import sys
 from pathlib import Path
-
-PR_IDS = (1, 2, 3, 4, 5, 6, 7)
 
 
 def load(d, name):
@@ -19,6 +18,26 @@ def load(d, name):
     if not p.exists():
         return None
     return json.loads(p.read_text())
+
+
+def _proj_repo(d):
+    """project/repo for a scrape dir (index.json), else infer from branches_*."""
+    idx = Path(d) / "index.json"
+    if idx.exists():
+        i = json.loads(idx.read_text())
+        return i["project"], i["repo"]
+    hit = next(Path(d, "rest").glob("branches_*.json"), None)
+    if hit:
+        _, proj, repo = hit.stem.split("_", 2)
+        return proj, repo
+    return "FIX", "golden"
+
+
+def pr_ids(d):
+    """Every PR id present in a scrape (from the pull-requests list)."""
+    proj, repo = _proj_repo(d)
+    prs = load(d, f"pull-requests_{proj}_{repo}") or []
+    return sorted({p["id"] for p in prs})
 
 
 def norm_pr(pr):
@@ -38,10 +57,10 @@ def norm_pr(pr):
         "author": (pr.get("author") or {}).get("user") or {},
         "authorSlug": ((pr.get("author") or {}).get("user") or {}).get("slug"),
         "reviewers": sorted({(p.get("user") or {}).get("slug")
-                             for p in (pr.get("reviewers") or [])}),
+                             for p in (pr.get("reviewers") or [])}, key=str),
         "participants": sorted({((p.get("user") or {}).get("slug"), p.get("role"),
                                  bool(p.get("approved")), p.get("status"))
-                                for p in (pr.get("participants") or [])}),
+                                for p in (pr.get("participants") or [])}, key=str),
     }
 
 
@@ -58,9 +77,9 @@ def norm_act(a):
     }, sort_keys=True)
 
 
-def check_prs(A, B, verbosity=1):
+def check_prs(A, B, pids, verbosity=1):
     fails = 0
-    for pid in PR_IDS:
+    for pid in pids:
         pa, pb = load(A, f"pr_{pid}"), load(B, f"pr_{pid}")
         if pa is None or pb is None:
             print(f"PR{pid}: missing on one side (A={pa is not None} B={pb is not None})")
@@ -89,9 +108,9 @@ def load_pr(d, pid):
     return load(d, f"pr_{pid}")
 
 
-def check_activities(A, B):
+def check_activities(A, B, pids):
     fails = 0
-    for pid in PR_IDS:
+    for pid in pids:
         aa, ab = load(A, f"pr_{pid}_activities"), load(B, f"pr_{pid}_activities")
         if aa is None or ab is None:
             print(f"PR{pid} activities: missing on one side")
@@ -127,7 +146,7 @@ def check_refs(A, B):
             print(f"{kind}: missing on one side"); fails += 1; continue
         def sig(items):
             return sorted({(x.get("id"), x.get("latestCommit"), x.get("hash"))
-                           for x in (items or [])})
+                           for x in (items or [])}, key=str)
         sa, sb = sig(ra), sig(rb)
         if sa != sb:
             fails += 1
@@ -142,17 +161,34 @@ def check_refs(A, B):
 
 
 def _git_objects(gitdir):
-    """sha -> (type, raw bytes) for every object in a bare repo."""
-    import subprocess
+    """sha -> (type, raw bytes) for every object in a bare repo.
+
+    Single `git cat-file --batch` process for all objects (one subprocess per
+    object would be ~seconds per 10k PRs * 1000s of objects = too slow).
+    """
     git = lambda *a: subprocess.run(["git", "-C", gitdir, *a],
                                     capture_output=True, check=True)
     out = git("cat-file", "--batch-all-objects",
               "--batch-check=%(objectname) %(objecttype)").stdout.decode()
     objs = {}
+    shas, types = [], {}
     for line in out.splitlines():
         sha, typ = line.split()
-        raw = git("cat-file", typ, sha).stdout
-        objs[sha] = (typ, raw)
+        shas.append(sha)
+        types[sha] = typ
+    p = subprocess.Popen(["git", "-C", gitdir, "cat-file", "--batch"],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    assert p.stdin is not None and p.stdout is not None
+    for sha in shas:
+        p.stdin.write(sha.encode() + b"\n")
+        p.stdin.flush()
+        hdr = p.stdout.readline().decode().split()
+        _sha, size = hdr[0], int(hdr[2])
+        raw = p.stdout.read(size)
+        p.stdout.read(1)
+        objs[_sha] = (types[sha], raw)
+    p.stdin.close()
+    p.wait()
     return objs
 
 
@@ -181,12 +217,12 @@ def check_git_objects(A, B):
     return 0
 
 
-def check_tasks(A, B):
+def check_tasks(A, B, pids):
     """Tasks (severity BLOCKER comments) must survive the round trip with
     fidelity. Comment ids differ (target reallocates), so compare by task text
     with severity/state and (for resolved) resolvedDate/resolver slug."""
     fails = 0
-    for pid in PR_IDS:
+    for pid in pids:
         aa, ab = load(A, f"pr_{pid}_activities"), load(B, f"pr_{pid}_activities")
         if aa is None or ab is None:
             continue
@@ -214,12 +250,15 @@ def main():
     ap.add_argument("scrape_a")
     ap.add_argument("scrape_b")
     args = ap.parse_args()
+    pids = sorted(set(pr_ids(args.scrape_a)) | set(pr_ids(args.scrape_b)))
+    print(f"[gate2] comparing {len(pids)} PRs "
+          f"({_proj_repo(args.scrape_a)[0]}/{_proj_repo(args.scrape_a)[1]})")
     f = 0
-    f += check_prs(args.scrape_a, args.scrape_b)
-    f += check_activities(args.scrape_a, args.scrape_b)
+    f += check_prs(args.scrape_a, args.scrape_b, pids)
+    f += check_activities(args.scrape_a, args.scrape_b, pids)
     f += check_refs(args.scrape_a, args.scrape_b)
     f += check_git_objects(args.scrape_a, args.scrape_b)
-    f += check_tasks(args.scrape_a, args.scrape_b)
+    f += check_tasks(args.scrape_a, args.scrape_b, pids)
     print("GATE 2:", "PASS" if f == 0 else f"FAIL ({f})")
     return 0 if f == 0 else 1
 

@@ -36,7 +36,7 @@ from pathlib import Path
 P = "com.atlassian.bitbucket.server"
 
 
-def export_from(base, user, password, container, shared_home, tmp):
+def export_from(base, user, password, container, shared_home, tmp, cp_cmd):
     """Trigger official export, wait, copy the tar out. Returns local tar path."""
     import requests
     tmp = Path(tmp); tmp.mkdir(parents=True, exist_ok=True)
@@ -59,9 +59,9 @@ def export_from(base, user, password, container, shared_home, tmp):
         raise RuntimeError(f"export job {job} ended with {state}")
     name = f"Bitbucket_export_{job}.tar"
     local = tmp / name
-    subprocess.run(["sudo", "-n", "nerdctl", "cp",
-                    f"{container}:{shared_home}/data/migration/export/{name}",
-                    str(local)], check=True)
+    cmd = cp_cmd.split() + [f"{container}:{shared_home}/data/migration/export/{name}",
+                            str(local)]
+    subprocess.run(cmd, check=True)
     print(f"[gate2b] archive -> {local}")
     return local
 
@@ -310,6 +310,9 @@ def main():
     ap.add_argument("--user", default="admin")
     ap.add_argument("--password", default="admin-lab-pw")
     ap.add_argument("--container", default="bb-lab-b")
+    ap.add_argument("--cp-cmd", default="sudo -n nerdctl cp",
+                    help="container cp command (e.g. \"nerdctl cp\" under "
+                         "Rancher Desktop/WSL)")
     ap.add_argument("--shared-home",
                     default="/var/atlassian/application-data/bitbucket/shared")
     ap.add_argument("--tmp", default="/tmp/opencode/gate2b")
@@ -321,7 +324,7 @@ def main():
     args = ap.parse_args()
 
     local = export_from(args.base, args.user, args.password, args.container,
-                        args.shared_home, args.tmp)
+                        args.shared_home, args.tmp, args.cp_cmd)
     syn_root = Path(args.tmp) / "syn"
     syn_root.mkdir(parents=True, exist_ok=True)
     with tarfile.open(local) as t:

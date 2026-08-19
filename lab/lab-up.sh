@@ -52,8 +52,8 @@ else
 fi
 
 # --- render bitbucket.properties (before first boot) -------------------------
-# The home dirs are owned by the container's uid (2003) after the first boot,
-# so writes go through sudo install.
+# Fresh home dirs are owned by the invoking user; after the first boot the
+# container's uid (2003) owns them, so fall back to sudo -n for re-runs.
 render_props() {
   local name="$1" base_url="$2"
   local f="$HOMES_DIR/$name/bitbucket.properties"
@@ -73,9 +73,24 @@ EOF
   if [[ -n "$LICENSE" ]]; then
     printf 'setup.license=%s\n' "$LICENSE" >> "$tmp"
   fi
-  sudo -n install -m 644 "$tmp" "$f" || { echo "failed to write $f (sudo needed)" >&2; rm -f "$tmp"; exit 1; }
-  rm -f "$tmp"
-  log "wrote $f"
+  if install -m 644 "$tmp" "$f" 2>/dev/null || sudo -n install -m 644 "$tmp" "$f" 2>/dev/null; then
+    rm -f "$tmp"
+    log "wrote $f"
+  else
+    echo "failed to write $f (needs write access or passwordless sudo)" >&2
+    rm -f "$tmp"
+    exit 1
+  fi
+}
+
+# JSON value extraction without jq (not guaranteed on Rancher Desktop/WSL).
+json_get() {
+  local key="$1"
+  python3 -c "import json,sys
+try: o=json.load(sys.stdin)
+except Exception: sys.exit(1)
+v=o.get('$key','')
+print(v if v else '')"
 }
 
 # --- container lifecycle -----------------------------------------------------
@@ -106,14 +121,14 @@ wait_ready() {
     if curl -sf -o /dev/null "$base/status"; then
       if [[ "${ALLOW_UNLICENSED:-0}" == "1" ]]; then
         # Unlicensed path: setup wizard not yet complete; wait for the app only.
-        if v="$(curl -sf "$base/rest/api/1.0/application-properties" | jq -r '.version // empty' 2>/dev/null)"; then
+        if v="$(curl -sf "$base/rest/api/1.0/application-properties" | json_get version 2>/dev/null)"; then
           log "$name APP UP (Bitbucket $v; wizard pending — run hack-unlicensed.sh)"
           return 0
         fi
       else
         # Setup is complete once the sysadmin account resolves to the configured name.
         if v="$(curl -s -u "$SYSADMIN_USER:$SYSADMIN_PASSWORD" \
-                "$base/rest/api/1.0/users/$SYSADMIN_USER" | jq -r '.name // empty' 2>/dev/null)"; then
+                "$base/rest/api/1.0/users/$SYSADMIN_USER" | json_get name 2>/dev/null)"; then
           if [[ "$v" == "$SYSADMIN_USER" ]]; then
             log "$name READY (sysadmin user '$v' exists)"
             return 0
@@ -128,18 +143,24 @@ wait_ready() {
   return 1
 }
 
-render_props "$A_NAME" "http://localhost:$A_HTTP_PORT"
+if [[ "${SKIP_A:-0}" != "1" ]]; then
+  render_props "$A_NAME" "http://localhost:$A_HTTP_PORT"
+fi
 render_props "$B_NAME" "http://localhost:$B_HTTP_PORT"
 
-start_container "$A_NAME" "$A_HTTP_PORT" "$A_SSH_PORT"
-wait_ready "$A_NAME" "$A_HTTP_PORT"
+if [[ "${SKIP_A:-0}" != "1" ]]; then
+  start_container "$A_NAME" "$A_HTTP_PORT" "$A_SSH_PORT"
+  wait_ready "$A_NAME" "$A_HTTP_PORT"
+fi
 
 start_container "$B_NAME" "$B_HTTP_PORT" "$B_SSH_PORT"
 wait_ready "$B_NAME" "$B_HTTP_PORT"
 
-log "Both containers ready."
-log "  A (export source): http://localhost:$A_HTTP_PORT  (ssh :$A_SSH_PORT)"
+log "Done. container(s) up."
+if [[ "${SKIP_A:-0}" != "1" ]]; then
+  log "  A (export source): http://localhost:$A_HTTP_PORT  (ssh :$A_SSH_PORT)"
+fi
 log "  B (import target): http://localhost:$B_HTTP_PORT  (ssh :$B_SSH_PORT)"
 log "  sysadmin: $SYSADMIN_USER / \$SYSADMIN_PASSWORD (config.env)"
-log "  export dir (A): $HOMES_DIR/$A_NAME/data/migration/export/"
-log "  export dir (B): $HOMES_DIR/$B_NAME/data/migration/export/"
+log "  shared home (A): $HOMES_DIR/$A_NAME/shared/data/migration/"
+log "  shared home (B): $HOMES_DIR/$B_NAME/shared/data/migration/"
