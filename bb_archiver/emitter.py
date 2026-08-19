@@ -287,9 +287,13 @@ class Emitter:
                     ("totalRemoved", (a.get("removed", {}) or {}).get("total", 0)),
                 ])))
             elif action == "MERGED":
+                commit = (a.get("commit") or {}).get("id", "")
+                if not commit:
+                    _log(f"PR {pr['id']}: MERGED activity #{a.get('id')} has "
+                         f"no commit (remote/stacked merge) — hash left empty")
                 others.append(self._ev("MERGED", ts, slug, OrderedDict([
                     ("autoMerge", bool(a.get("autoMerge"))),
-                    ("hash", a["commit"]["id"]),
+                    ("hash", commit),
                 ])))
             else:
                 others.append(self._ev("ACTIVITY", ts, slug, {"action": action}))
