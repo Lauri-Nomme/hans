@@ -371,14 +371,56 @@ class Emitter:
             packs = [p for p in os.listdir(packdir) if p.endswith(".pack")]
             if not packs:
                 raise RuntimeError("no pack produced by repack")
-            # stream-unpack the pack into loose objects (no in-memory buffer)
+            packfile = os.path.join(packdir, packs[0])
+            # stream-unpack the pack into loose objects (no in-memory buffer).
+            # This is the slow step on big repos (one file per git object); report
+            # live progress by polling the loose-object count vs the pack total.
             subprocess.run(["git", "init", "-q", "-b", "unused", "--bare", tmp],
                            check=True, capture_output=True)
-            _log("git objects: unpacking pack to loose objects")
-            with open(os.path.join(packdir, packs[0]), "rb") as pf:
-                subprocess.run(["git", "unpack-objects", "-q", "-r"],
-                               check=True, cwd=tmp, stdin=pf,
-                               capture_output=True)
+            total = int(subprocess.run(
+                ["git", "cat-file", "--batch-all-objects", "--batch-check=%(objectname)"],
+                check=True, cwd=gitdir, capture_output=True, text=True,
+            ).stdout.count("\n"))
+            _log(f"git objects: unpacking {total} objects to loose form")
+            objs_dir = os.path.join(tmp, "objects")
+            stop = {"done": False}
+            import threading
+            def _monitor():
+                last = 0
+                while not stop["done"]:
+                    time.sleep(5)
+                    n = 0
+                    try:
+                        for ab in os.listdir(objs_dir):
+                            n += len(os.listdir(os.path.join(objs_dir, ab)))
+                    except FileNotFoundError:
+                        continue
+                    if n and n != last:
+                        pct = n / total * 100
+                        rate = n / max(time.time() - t0, 1)
+                        eta = (total - n) / max(rate, 1)
+                        _log(f"git objects: unpacked {n}/{total} "
+                             f"({pct:4.1f}%, {rate:,.0f}/s, ETA {int(eta)}s)")
+                        last = n
+            proc = subprocess.Popen(["git", "unpack-objects", "-q", "-r"],
+                                    cwd=tmp, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            t0 = time.time()
+            threading.Thread(target=_monitor, daemon=True).start()
+            try:
+                with open(packfile, "rb") as pf:
+                    while True:
+                        chunk = pf.read(1 << 20)
+                        if not chunk:
+                            break
+                        proc.stdin.write(chunk)
+            except BrokenPipeError:
+                pass
+            proc.stdin.close()
+            stop["done"] = True
+            if proc.wait() != 0:
+                raise RuntimeError("git unpack-objects failed")
             # stream loose objects straight into a tar file on disk
             with tarfile.open(out_path, "w", format=tarfile.PAX_FORMAT) as tar:
                 objs = os.path.join(tmp, "objects")
