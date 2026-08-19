@@ -157,6 +157,37 @@ bb-archiver validate --archive Bitbucket_export_synth_1.tar
 
 Checks tar structure + gzip headers against `FORMAT_SPEC.md`.
 
+### Step 3b — verify a real bake with no admin export (work box)
+
+When the source Bitbucket admins won't run the official export (so Gate 1/2B
+against a golden are moot), import the archive into a local lab container and
+compare the *imported* repo against the original scrape with Gate 2. This runs
+entirely on the work box — the archive never leaves it.
+
+On the work box (Rancher Desktop/WSL2 provides `nerdctl`):
+
+```bash
+# 1. bring up only the import target (bb-lab-b) and drive its wizard
+SKIP_A=1 LAB_LICENSE_FILE=/path/to/trial3h.txt ./lab/lab-up.sh
+./lab/wizard.sh bb-lab-b
+
+# 2. import the archive (copies into shared migration/import dir, chowns,
+#    POSTs the import and polls to completion)
+./lab/import.sh ./scrape/Bitbucket_export_SX202608191427_1.tar bb-lab-b
+
+# 3. scrape the imported repo (A = original scrape dir already on this box)
+python3 corpus/scrape.py http://localhost:7991 --user admin --password '...' \
+    -o ./scrape/sx-lab-b
+
+# 4. round-trip gate: original scrape vs imported (PR-count-agnostic, batch
+#    git-object compare — built for 10k PRs / 863k objects)
+python3 corpus/gate2.py ./scrape/SX ./scrape/sx-lab-b
+```
+
+Expected benign diffs: comment ids reallocated on import, activity ordering
+churn, and stub users (displayName=slug) on the target — gate2 keys by slug.
+Any other diff is an emitter bug at scale.
+
 ### Step 4 — migrate with GitHub Enterprise Importer
 
 Set the GitHub PAT, then:
