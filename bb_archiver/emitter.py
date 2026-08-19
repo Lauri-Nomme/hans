@@ -297,10 +297,11 @@ class Emitter:
         return _gzbuf(jw.pretty(comments + others).encode())
 
     # ---------------- PR caches ------------------------------------------
-    def pr_cache(self, pr):
+    def pr_cache(self, pr, base=None):
         """cached-ancestor.txt = fromTip,toTip,mergeBase (no newline).
         merge-base is computed from the git mirror (not a REST diff)."""
-        base = self._merge_base(pr)
+        if base is None:
+            base = self._merge_base(pr)
         if base is None:
             base = self.m.pr(pr["id"])["fromRef"]["latestCommit"]
         line = f"{pr['fromRef']['latestCommit']},{pr['toRef']['latestCommit']},{base}"
@@ -318,6 +319,49 @@ class Emitter:
             return out.stdout.strip() or None
         except Exception:
             return None
+
+    def _merge_bases(self, prs, workers=None):
+        """Compute merge-bases for all PRs concurrently (each git subprocess
+        releases the GIL), deduped by (from,to) commit pair. Returns
+        {pid: base_sha_or_None}. Avoids one process spawn per PR."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        gitdir = self.m.dir / "git"
+        if not (gitdir / "objects").exists():
+            return {pr["id"]: None for pr in prs}
+        pair_for = {}
+        for pr in prs:
+            pair_for.setdefault((pr["fromRef"]["latestCommit"],
+                                 pr["toRef"]["latestCommit"]), pr["id"])
+        pairs = list(pair_for)
+        results = {}
+        lock = threading.Lock()
+        done = 0
+        total = len(pairs)
+
+        def work(pair):
+            try:
+                out = subprocess.run(
+                    ["git", "merge-base", pair[0], pair[1]],
+                    capture_output=True, text=True, check=True, cwd=gitdir)
+                return out.stdout.strip() or None
+            except Exception:
+                return None
+
+        workers = workers or min(os.cpu_count() or 4, 16)
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(work, p): p for p in pairs}
+            for fut in as_completed(futs):
+                with lock:
+                    results[futs[fut]] = fut.result()
+                    done += 1
+                    if done % 500 == 0 or done == total:
+                        el = time.time() - t0
+                        rate = done / max(el, 0.001)
+                        _log(f"git objects: merge-base {done}/{total} "
+                             f"({rate:,.0f}/s, ETA {int((total - done) / rate)}s)")
+        return {pair_for[p]: results[p] for p in pairs}
 
     # ---------------- git skeleton ---------------------------------------
     def _reflog(self, pr, activities):
@@ -526,6 +570,8 @@ class Emitter:
                 prs = sorted(self.m.prs() or [], key=lambda p: p["id"])
                 total = len(prs)
                 _log(f"archive: writing {total} pull requests")
+                _log("archive: precomputing merge-bases")
+                bases = self._merge_bases(prs)
                 for i, pr in enumerate(prs, 1):
                     pid = pr["id"]
                     add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/metadata.json.atl.gz",
@@ -533,7 +579,7 @@ class Emitter:
                     add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/activities.json.atl.gz",
                         self.pr_activities(pr))
                     add(f"{GITPR}/repositories/{self.rid}/pullrequests/{pid}/caches.atl.tar.atl.gz",
-                        self.pr_cache(pr))
+                        self.pr_cache(pr, bases.get(pid)))
                     if i % 25 == 0 or i == total:
                         _log(f"PR {i}/{total} done")
                 add(f"_/repository/hierarchy_end/{self.hid}", b"")
