@@ -1,0 +1,12 @@
+[package]
+name = "bb-obj-tar"
+version = "0.1.0"
+edition = "2021"
+description = "Stream a git repo's objects into a Bitbucket-format loose-object tar (byte-identical to git unpack-objects)"
+
+[dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

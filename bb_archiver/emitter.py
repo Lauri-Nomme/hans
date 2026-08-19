@@ -38,7 +38,8 @@ def _gzbuf(data: bytes) -> bytes:
 
 class Emitter:
     def __init__(self, model, app_version="9.4.18", build_version="9004018",
-                 instance_name="Bitbucket", node_id=None, export_mtime=None):
+                 instance_name="Bitbucket", node_id=None, export_mtime=None,
+                 obj_tar_bin=None):
         self.m = model
         self.app_version = app_version
         self.build_version = build_version
@@ -48,6 +49,7 @@ class Emitter:
         self.pid = self.m.project_id
         self.rid = self.m.repo_id
         self.hid = self.m.hierarchy_id
+        self.obj_tar_bin = obj_tar_bin
 
     # ---------------- low-level JSON builders ----------------------------
     def instance_details(self):
@@ -360,6 +362,29 @@ class Emitter:
         """Repack the mirror, stream loose objects into an inner tar on disk at
         `out_path` (O(1) memory — never loads the pack or all objects at once)."""
         gitdir = self.m.dir / "git"
+        if self.obj_tar_bin:
+            return self._git_objects_rust(gitdir, out_path)
+        return self._git_objects_python(gitdir, out_path)
+
+    def _git_objects_rust(self, gitdir, out_path):
+        """Fast path: use the bb-obj-tar Rust helper (byte-identical loose
+        objects, no per-object files on disk, parallel chunked streaming)."""
+        if os.path.isdir(os.path.join(gitdir, "objects", "pack")):
+            _log("git objects: repacking mirror")
+            subprocess.run(["git", "repack", "-adf"], check=True, cwd=gitdir,
+                           capture_output=True)
+        _log(f"git objects: bb-obj-tar streaming objects (chunks=4)")
+        proc = subprocess.run(
+            [self.obj_tar_bin, str(gitdir), "--out", str(out_path), "--chunks", "4"],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"bb-obj-tar failed ({proc.returncode}): {proc.stderr}")
+        for line in proc.stdout.splitlines():
+            _log(f"git objects: {line}")
+        return out_path
+
+    def _git_objects_python(self, gitdir, out_path):
         tmp = tempfile.mkdtemp(prefix="objpack-")
         try:
             # fresh single pack from the mirror

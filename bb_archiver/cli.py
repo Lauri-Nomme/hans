@@ -29,7 +29,7 @@ def cmd_assemble(args):
         node_id = args.node_id
     em = Emitter(m, app_version=args.app_version, build_version=args.build_version,
                  instance_name=args.instance_name, node_id=node_id,
-                 export_mtime=args.mtime)
+                 export_mtime=args.mtime, obj_tar_bin=args.obj_tar_bin)
     out = em.assemble(args.out)
     n = sum(1 for _ in tarfile.open(out))
     _log_archive(f"archive complete: {n} entries")
@@ -83,6 +83,9 @@ def main(argv=None):
     a.add_argument("--instance-name", default="Bitbucket")
     a.add_argument("--node-id", default=None)
     a.add_argument("--mtime", type=int, default=0)
+    a.add_argument("--obj-tar-bin", default=None,
+                   help="path to the bb-obj-tar Rust helper for fast, "
+                        "parallel git-object streaming (byte-identical output)")
     a.set_defaults(fn=cmd_assemble)
 
     v = sub.add_parser("validate")

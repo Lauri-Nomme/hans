@@ -7,3 +7,4 @@ lab/license*.txt
 .mnemonics/__pycache__/
 __pycache__/
 *.pyc
+tools/bb-obj-tar/target/
