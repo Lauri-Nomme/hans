@@ -290,11 +290,12 @@ class Emitter:
                 commit = (a.get("commit") or {}).get("id", "")
                 if not commit:
                     _log(f"PR {pr['id']}: MERGED activity #{a.get('id')} has "
-                         f"no commit (remote/stacked merge) — hash left empty")
-                others.append(self._ev("MERGED", ts, slug, OrderedDict([
-                    ("autoMerge", bool(a.get("autoMerge"))),
-                    ("hash", commit),
-                ])))
+                         f"no commit (dependent PR merged) — hash omitted "
+                         f"(matches admin export)")
+                items = [("autoMerge", bool(a.get("autoMerge")))]
+                if commit:
+                    items.append(("hash", commit))
+                others.append(self._ev("MERGED", ts, slug, OrderedDict(items)))
             else:
                 others.append(self._ev("ACTIVITY", ts, slug, {"action": action}))
         comments.sort(key=lambda e: e["createdTimestamp"])
