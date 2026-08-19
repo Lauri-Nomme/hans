@@ -8,3 +8,4 @@ lab/license*.txt
 __pycache__/
 *.pyc
 tools/bb-obj-tar/target/
+tools/bb-merge-base/target/
