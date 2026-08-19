@@ -10,7 +10,7 @@ from pathlib import Path
 from . import jsonwriter as jw
 from .emitter import Emitter
 from .model import load_model
-from .scrape import crawl
+from .scrape import crawl, _log
 
 
 def cmd_scrape(args):
@@ -18,8 +18,8 @@ def cmd_scrape(args):
                   args.out,
                   git_dir=None if args.no_git else str(Path(args.out) / "git"),
                   limit_prs=args.limit_prs, checkpoint=not args.no_resume)
-    print(f"scraped {args.project}/{args.repo} -> {args.out} "
-          f"(project_id={index['project_id']} repo_id={index['repo_id']})")
+    _log(f"scraped {args.project}/{args.repo} -> {args.out} "
+         f"(project_id={index['project_id']} repo_id={index['repo_id']})")
 
 
 def cmd_assemble(args):
@@ -32,7 +32,7 @@ def cmd_assemble(args):
                  export_mtime=args.mtime)
     out = em.assemble(args.out)
     n = sum(1 for _ in tarfile.open(out))
-    print(f"assembled {out} ({n} entries)")
+    _log(f"assembled {out} ({n} entries)")
 
 
 def cmd_validate(args):
@@ -50,7 +50,7 @@ def cmd_validate(args):
             elif name.endswith(".tar"):
                 pass
         # instance-details must be present, parseable, archiveVersion=2
-    print(f"validated {args.archive}: {len(problems)} problems")
+    _log(f"validated {args.archive}: {len(problems)} problems")
     for p in problems:
         print("  ", p)
     return 1 if problems else 0

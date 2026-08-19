@@ -41,6 +41,12 @@ from pathlib import Path
 import requests
 
 
+def _log(msg):
+    """Print with an ISO-8601 UTC timestamp prefix for correlation."""
+    print(f"[scrape] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}",
+          flush=True)
+
+
 class Api:
     """requests wrapper: pagination, rate-limit sleep, retry/backoff."""
 
@@ -52,6 +58,10 @@ class Api:
         self.headroom = headroom
         self.limit = self.remaining = self.reset = None
 
+    def _log(self, msg):
+        """Print with an ISO-8601 UTC timestamp prefix for correlation."""
+        _log(msg)
+
     def _throttle(self):
         if self.remaining is None:
             return
@@ -59,8 +69,8 @@ class Api:
             return
         wait = (self.reset or time.time()) - time.time() + 5
         if wait > 0:
-            print(f"[scrape] rate limit low ({self.remaining}/{self.limit}) — "
-                  f"sleeping {int(wait)}s", flush=True)
+            self._log(f"rate limit low ({self.remaining}/{self.limit}) — "
+                      f"sleeping {int(wait)}s")
             time.sleep(wait)
 
     def _limits(self, resp):
@@ -83,18 +93,18 @@ class Api:
                     return r.json()
                 if r.status_code == 403 and "rate limit" in r.text.lower():
                     wait = max((self.reset or 0) - time.time() + 2, 30)
-                    print(f"[scrape] 403 rate-limited — sleeping {int(wait)}s", flush=True)
+                    self._log(f"403 rate-limited — sleeping {int(wait)}s")
                     time.sleep(wait)
                     continue
                 if r.status_code in (429, 500, 502, 503, 504):
                     wait = min(2 ** attempt * 2, 60)
-                    print(f"[scrape] HTTP {r.status_code} — retry in {wait}s", flush=True)
+                    self._log(f"HTTP {r.status_code} — retry in {wait}s")
                     time.sleep(wait)
                     continue
                 r.raise_for_status()
             except (requests.RequestException, ConnectionError, TimeoutError):
                 wait = min(2 ** attempt * 2, 60)
-                print(f"[scrape] network error — retry in {wait}s", flush=True)
+                self._log(f"network error — retry in {wait}s")
                 time.sleep(wait)
         raise RuntimeError(f"gave up after {retries} retries: {path}")
 
@@ -177,7 +187,7 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
             done.add(pid)
             ckpt_path.write_text(json.dumps({"prs_done": sorted(done)}))
         if total and (i % 25 == 0 or i == total):
-            print(f"[scrape] PR {i}/{total} done", flush=True)
+            api._log(f"PR {i}/{total} done")
 
     # --- git mirror ----------------------------------------------------------
     if git_dir is not None:
@@ -206,7 +216,7 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index, git="git")
                     "+refs/pull-requests/*:refs/pull-requests/*",
                     "+refs/stash-refs/*:refs/stash-refs/*"],
                    check=True, cwd=git_dir)
-    print(f"    git mirror ready at {git_dir}")
+    _log(f"git mirror ready at {git_dir}")
     return git_dir
 
 
@@ -226,7 +236,7 @@ def main():
     index = crawl(args.base, args.user, args.password, args.project, args.repo, args.out,
                   git_dir=None if args.no_git else os.path.join(args.out, "git"),
                   limit_prs=args.limit_prs, checkpoint=not args.no_resume)
-    print(f"scraped {index['project']}/{index['repo']} -> {args.out}")
+    _log(f"scraped {index['project']}/{index['repo']} -> {args.out}")
 
 
 if __name__ == "__main__":
