@@ -18,6 +18,12 @@ from pathlib import Path
 from . import jsonwriter as jw
 
 META = "com.atlassian.bitbucket.server.bitbucket-instance-migration"
+
+
+def _log(msg):
+    """Print with an ISO-8601 UTC timestamp prefix for correlation."""
+    print(f"[assemble] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}",
+          flush=True)
 GIT = "com.atlassian.bitbucket.server.bitbucket-git_git"
 GITPR = "com.atlassian.bitbucket.server.bitbucket-git_gitPullRequests"
 LFS = "com.atlassian.bitbucket.server.bitbucket-git-lfs_gitLfsSettings"
@@ -358,6 +364,7 @@ class Emitter:
         try:
             # fresh single pack from the mirror
             if os.path.isdir(os.path.join(gitdir, "objects", "pack")):
+                _log("git objects: repacking mirror")
                 subprocess.run(["git", "repack", "-adf"], check=True, cwd=gitdir,
                                capture_output=True)
             packdir = os.path.join(gitdir, "objects", "pack")
@@ -367,6 +374,7 @@ class Emitter:
             # stream-unpack the pack into loose objects (no in-memory buffer)
             subprocess.run(["git", "init", "-q", "-b", "unused", "--bare", tmp],
                            check=True, capture_output=True)
+            _log("git objects: unpacking pack to loose objects")
             with open(os.path.join(packdir, packs[0]), "rb") as pf:
                 subprocess.run(["git", "unpack-objects", "-q", "-r"],
                                check=True, cwd=tmp, stdin=pf,
@@ -374,6 +382,7 @@ class Emitter:
             # stream loose objects straight into a tar file on disk
             with tarfile.open(out_path, "w", format=tarfile.PAX_FORMAT) as tar:
                 objs = os.path.join(tmp, "objects")
+                n = 0
                 for ab in os.listdir(objs):
                     abdir = os.path.join(objs, ab)
                     for name in os.listdir(abdir):
@@ -386,6 +395,8 @@ class Emitter:
                         ti.uid = ti.gid = 0
                         with open(fp, "rb") as f:
                             tar.addfile(ti, f)
+                        n += 1
+                _log(f"git objects: streamed {n} loose objects")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         return out_path
@@ -398,6 +409,7 @@ class Emitter:
         objtar.close()
         try:
             self.git_objects(objtar_name)
+            _log("archive: writing instance/project/repo/git sections")
             with tarfile.open(out_path, "w", format=tarfile.PAX_FORMAT) as tar:
                 def add(name, data):
                     ti = tarfile.TarInfo(name)
@@ -437,7 +449,10 @@ class Emitter:
                          objtar_name)
                 add(f"{LFS}/{self.rid}/git-lfs-settings.json.atl.gz",
                     self.gitlfs_settings())
-                for pr in sorted(self.m.prs() or [], key=lambda p: p["id"]):
+                prs = sorted(self.m.prs() or [], key=lambda p: p["id"])
+                total = len(prs)
+                _log(f"archive: writing {total} pull requests")
+                for i, pr in enumerate(prs, 1):
                     pid = pr["id"]
                     add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/metadata.json.atl.gz",
                         self.pr_metadata(pr))
@@ -445,7 +460,10 @@ class Emitter:
                         self.pr_activities(pr))
                     add(f"{GITPR}/repositories/{self.rid}/pullrequests/{pid}/caches.atl.tar.atl.gz",
                         self.pr_cache(pr))
+                    if i % 25 == 0 or i == total:
+                        _log(f"PR {i}/{total} done")
                 add(f"_/repository/hierarchy_end/{self.hid}", b"")
+            _log(f"assembled {out_path}")
             return out_path
         finally:
             os.unlink(objtar_name)

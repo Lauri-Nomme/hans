@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from . import jsonwriter as jw
-from .emitter import Emitter
+from .emitter import Emitter, _log as _log_archive
 from .model import load_model
 from .scrape import crawl, _log
 
@@ -32,7 +32,7 @@ def cmd_assemble(args):
                  export_mtime=args.mtime)
     out = em.assemble(args.out)
     n = sum(1 for _ in tarfile.open(out))
-    _log(f"assembled {out} ({n} entries)")
+    _log_archive(f"archive complete: {n} entries")
 
 
 def cmd_validate(args):
