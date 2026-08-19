@@ -39,7 +39,7 @@ def _gzbuf(data: bytes) -> bytes:
 class Emitter:
     def __init__(self, model, app_version="9.4.18", build_version="9004018",
                  instance_name="Bitbucket", node_id=None, export_mtime=None,
-                 obj_tar_bin=None, obj_tar_chunks=0):
+                 obj_tar_bin=None, obj_tar_chunks=0, merge_base_bin=None):
         self.m = model
         self.app_version = app_version
         self.build_version = build_version
@@ -51,6 +51,7 @@ class Emitter:
         self.hid = self.m.hierarchy_id
         self.obj_tar_bin = obj_tar_bin
         self.obj_tar_chunks = int(obj_tar_chunks or 0)
+        self.merge_base_bin = merge_base_bin
 
     # ---------------- low-level JSON builders ----------------------------
     def instance_details(self):
@@ -321,11 +322,10 @@ class Emitter:
             return None
 
     def _merge_bases(self, prs, workers=None):
-        """Compute merge-bases for all PRs concurrently (each git subprocess
-        releases the GIL), deduped by (from,to) commit pair. Returns
-        {pid: base_sha_or_None}. Avoids one process spawn per PR."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import threading
+        """Compute merge-bases for all PRs, deduped by (from,to) commit pair.
+        Returns {pid: base_sha_or_None}. Fast path: bb-merge-base Rust binary
+        (libgit2) answers all pairs in one batch; fallback: git merge-base
+        subprocesses via a thread pool."""
         gitdir = self.m.dir / "git"
         if not (gitdir / "objects").exists():
             return {pr["id"]: None for pr in prs}
@@ -334,6 +334,32 @@ class Emitter:
             pair_for.setdefault((pr["fromRef"]["latestCommit"],
                                  pr["toRef"]["latestCommit"]), pr["id"])
         pairs = list(pair_for)
+
+        if self.merge_base_bin:
+            return self._merge_bases_rust(gitdir, pairs, pair_for)
+        return self._merge_bases_git(gitdir, pairs, pair_for, workers)
+
+    def _merge_bases_rust(self, gitdir, pairs, pair_for):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        _log(f"git objects: bb-merge-base computing {len(pairs)} merge-bases")
+        payload = "".join(f"{f} {t}\n" for f, t in pairs)
+        t0 = time.time()
+        proc = subprocess.run([self.merge_base_bin, str(gitdir)],
+                              input=payload, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(f"bb-merge-base failed ({proc.returncode}): "
+                               f"{proc.stderr}")
+        lines = proc.stdout.splitlines()
+        if len(lines) != len(pairs):
+            raise RuntimeError(f"bb-merge-base returned {len(lines)} lines "
+                               f"for {len(pairs)} pairs")
+        _log(f"git objects: bb-merge-base done in {time.time() - t0:.1f}s")
+        return {pair_for[p]: (line or None) for p, line in zip(pairs, lines)}
+
+    def _merge_bases_git(self, gitdir, pairs, pair_for, workers=None):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
         results = {}
         lock = threading.Lock()
         done = 0

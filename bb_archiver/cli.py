@@ -31,10 +31,15 @@ def cmd_assemble(args):
         args.obj_tar_bin = _autodetect_obj_tar_bin()
         if args.obj_tar_bin:
             _log_archive(f"assemble: using autodetected bb-obj-tar {args.obj_tar_bin}")
+    if not args.merge_base_bin:
+        args.merge_base_bin = _autodetect_merge_base_bin()
+        if args.merge_base_bin:
+            _log_archive(f"assemble: using autodetected bb-merge-base {args.merge_base_bin}")
     em = Emitter(m, app_version=args.app_version, build_version=args.build_version,
                  instance_name=args.instance_name, node_id=node_id,
                  export_mtime=args.mtime, obj_tar_bin=args.obj_tar_bin,
-                 obj_tar_chunks=args.obj_tar_chunks)
+                 obj_tar_chunks=args.obj_tar_chunks,
+                 merge_base_bin=args.merge_base_bin)
     out = em.assemble(args.out)
     n = sum(1 for _ in tarfile.open(out))
     _log_archive(f"archive complete: {n} entries")
@@ -52,6 +57,23 @@ def _autodetect_obj_tar_bin():
         return None
     dist = Path(__file__).resolve().parent.parent / "tools" / "bb-obj-tar" / "dist"
     for cand in (dist / names, Path("tools") / "bb-obj-tar" / "dist" / names):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+def _autodetect_merge_base_bin():
+    """Return the platform-appropriate bb-merge-base binary from the repo's
+    tools/bb-merge-base/dist dir if present and executable, else None."""
+    import os
+    names = {
+        "win32": "bb-merge-base-windows-x86_64.exe",
+        "linux": "bb-merge-base-linux-x86_64",
+    }.get(sys.platform)
+    if not names:
+        return None
+    dist = Path(__file__).resolve().parent.parent / "tools" / "bb-merge-base" / "dist"
+    for cand in (dist / names, Path("tools") / "bb-merge-base" / "dist" / names):
         if cand.is_file() and os.access(cand, os.X_OK):
             return str(cand)
     return None
@@ -111,6 +133,9 @@ def main(argv=None):
     a.add_argument("--obj-tar-chunks", type=int, default=0,
                    help="worker chunk count for bb-obj-tar (default 0 = "
                         "let the binary use num_cpus)")
+    a.add_argument("--merge-base-bin", default=None,
+                   help="path to the bb-merge-base Rust helper for batched "
+                        "merge-base (libgit2); falls back to git CLI if absent")
     a.set_defaults(fn=cmd_assemble)
 
     v = sub.add_parser("validate")
