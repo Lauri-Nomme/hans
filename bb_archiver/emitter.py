@@ -39,7 +39,7 @@ def _gzbuf(data: bytes) -> bytes:
 class Emitter:
     def __init__(self, model, app_version="9.4.18", build_version="9004018",
                  instance_name="Bitbucket", node_id=None, export_mtime=None,
-                 obj_tar_bin=None):
+                 obj_tar_bin=None, obj_tar_chunks=0):
         self.m = model
         self.app_version = app_version
         self.build_version = build_version
@@ -50,6 +50,7 @@ class Emitter:
         self.rid = self.m.repo_id
         self.hid = self.m.hierarchy_id
         self.obj_tar_bin = obj_tar_bin
+        self.obj_tar_chunks = int(obj_tar_chunks or 0)
 
     # ---------------- low-level JSON builders ----------------------------
     def instance_details(self):
@@ -373,11 +374,14 @@ class Emitter:
             _log("git objects: repacking mirror")
             subprocess.run(["git", "repack", "-adf"], check=True, cwd=gitdir,
                            capture_output=True)
-        _log(f"git objects: bb-obj-tar streaming objects (chunks=4)")
-        proc = subprocess.run(
-            [self.obj_tar_bin, str(gitdir), "--out", str(out_path), "--chunks", "4"],
-            capture_output=True, text=True,
-        )
+        if self.obj_tar_chunks:
+            _log(f"git objects: bb-obj-tar streaming objects (chunks={self.obj_tar_chunks})")
+            args = [self.obj_tar_bin, str(gitdir), "--out", str(out_path),
+                    "--chunks", str(self.obj_tar_chunks)]
+        else:
+            _log("git objects: bb-obj-tar streaming objects (auto chunks=num_cpus)")
+            args = [self.obj_tar_bin, str(gitdir), "--out", str(out_path)]
+        proc = subprocess.run(args, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"bb-obj-tar failed ({proc.returncode}): {proc.stderr}")
         for line in proc.stdout.splitlines():
