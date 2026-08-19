@@ -89,11 +89,15 @@ bb-archiver validate  -> schema self-check of the tar
   genuine differences.
 - **Gate 2 — round-trip import**: `corpus/gate2.py` imports the synthetic
   archive into lab instance `bb-lab-b`, rescrapes both, and diffs PRs,
-  activities, branches, tags, and git objects object-wise. **PASS**.
+  activities, branches, tags, and git objects object-wise. **PASS** — all 7 PRs
+  incl. the stacked-pair PR4 phantom-merge (commit-less MERGED survives import),
+  65 git objects identical.
 - **Gate 2B — official re-export**: `corpus/gate2b.py` re-exports `bb-lab-b`
   with the *official* admin endpoint and compares against the golden export,
   surfacing everything the official path preserves that REST cannot see.
-  **PASS** — only genuine diff is title/description-edit `ACTIVITY/UPDATED`.
+  **PASS** — only genuine diff is title/description-edit `ACTIVITY/UPDATED`
+  (round-trip loss) and per-instance hierarchy markers are excluded; PR4's
+  commit-less MERGED reproduces exactly.
 - **Gate 3 — end-to-end GEI**: `corpus/gate3.py` — the lab's synthetic archive
   was accepted by `gh bbs2gh migrate-repo --archive-path` into the `unapplicable`
   Enterprise-trial org and migrated with **byte-identical git SHAs**, correct PR
