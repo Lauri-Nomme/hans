@@ -161,6 +161,41 @@ git -c user.name="Alan Turing" -c user.email="alan@example.com" \
 push_branches "alan:alan-pw-123" "+refs/tags/v1.1"
 log "PR1: annotated tag v1.1 pushed (tagger alan, on merge commit $MERGE_SHA)"
 
+# -------------------- PR 6 + PR 7: stacked pair (MERGED without commit) ----
+# PR6 (feature/stacked/base -> main) stays open; PR7 (feature/stacked/dependent
+# -> main, descended from base) is merged. Merging PR7 carries PR6's commits
+# into main, so Bitbucket flips PR6 to a commit-less MERGED ("remotely merged").
+# Placed BEFORE PR4 so the main advance does not reset PR4's reviewer states.
+PR6_BRANCH=feature/stacked/base
+PR6_ID="$(pr_by_branch "$PR6_BRANCH")"
+if [[ -z "$PR6_ID" ]]; then
+  log "creating PR6 ($PR6_BRANCH -> main, will show commit-less MERGED after PR7)"
+  PR6_ID="$(pr_create "ada:ada-pw-123" \
+    '"feat: stacked base"' \
+    '"Base PR of a stacked pair; merging the dependent PR7 flips this to a commit-less MERGED. 📚"' \
+    "$PR6_BRANCH" '[]' | jq -r '.id')"
+  log "PR6 id=$PR6_ID"
+fi
+api POST "$R/pull-requests/$PR6_ID/comments" \
+  "$(py_json "{'text': 'base PR of the stacked pair 📚'}")" >/dev/null
+log "PR6: top-level comment"
+
+PR7_BRANCH=feature/stacked/dependent
+PR7_ID="$(pr_by_branch "$PR7_BRANCH")"
+if [[ -z "$PR7_ID" ]]; then
+  log "creating PR7 ($PR7_BRANCH -> main, will MERGE)"
+  PR7_ID="$(pr_create "grace:grace-pw-123" \
+    '"feat: stacked dependent"' \
+    '"Dependent PR on top of PR6; merging it causes the commit-less MERGED on PR6. 🔀"' \
+    "$PR7_BRANCH" '[{"user":{"name":"alan"}}]' | jq -r '.id')"
+  log "PR7 id=$PR7_ID"
+fi
+if merge_pr "$PR7_ID" "Merged in $PR7_BRANCH (pull request #$PR7_ID)" "merge_commit"; then
+  log "PR7: MERGED (merge_commit) -> PR6 should now show commit-less MERGED"
+else
+  log "PR7: merge failed after retries"
+fi
+
 # ------------------------------- PR 4: OPEN ----------------------------------
 PR4_BRANCH=feature/explore
 PR4_ID="$(pr_by_branch "$PR4_BRANCH")"
@@ -286,4 +321,4 @@ else
   log "commit-level comment skipped (sha lookup)"
 fi
 
-log "PR layer complete. PR ids: PR1=$PR1_ID PR2=$PR2_ID PR3=$PR3_ID PR4=$PR4_ID PR5=$PR5_ID"
+log "PR layer complete. PR ids: PR1=$PR1_ID PR2=$PR2_ID PR3=$PR3_ID PR4=$PR4_ID PR5=$PR5_ID PR6=$PR6_ID PR7=$PR7_ID"

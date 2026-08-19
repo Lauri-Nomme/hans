@@ -306,7 +306,7 @@ def main():
     ap.add_argument("--shared-home",
                     default="/var/atlassian/application-data/bitbucket/shared")
     ap.add_argument("--tmp", default="/tmp/opencode/gate2b")
-    ap.add_argument("--repo-id-real", type=int, default=15,
+    ap.add_argument("--repo-id-real", type=int, default=2,
                     help="repo id in the golden archive")
     ap.add_argument("--repo-id-syn", type=int, default=1,
                     help="repo id on bb-lab-b after import")

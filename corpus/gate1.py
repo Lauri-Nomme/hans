@@ -19,6 +19,8 @@ import sys
 import tarfile
 from collections import OrderedDict
 
+PR_IDS = (1, 2, 3, 4, 5, 6, 7)
+
 
 def _decomp(tf, name):
     f = tf.extractfile(name)
@@ -174,7 +176,7 @@ def check_tasks(real, syn, report):
                             ("id", "severity", "state", "text",
                              "resolvedTimestamp", "resolverId")})
         return out
-    for pid in (1, 2, 3, 4, 5):
+    for pid in PR_IDS:
         rtasks = task_comments(real.get(pid))
         stasks = task_comments(syn.get(pid))
         rtasks.sort(key=lambda t: t["id"])
@@ -255,8 +257,8 @@ def main():
     args = ap.parse_args()
     r = Report()
     compare(args.real, args.syn, r)
-    real_acts = {pid: load_activities(args.real, pid) for pid in (1, 2, 3, 4, 5)}
-    syn_acts = {pid: load_activities(args.syn, pid) for pid in (1, 2, 3, 4, 5)}
+    real_acts = {pid: load_activities(args.real, pid) for pid in PR_IDS}
+    syn_acts = {pid: load_activities(args.syn, pid) for pid in PR_IDS}
     check_tasks(real_acts, syn_acts, r)
     print("=== Gate 1 semantic diff ===")
     for n in r.notes:

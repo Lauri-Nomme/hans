@@ -325,7 +325,14 @@ advances (e.g. another PR merged, PR1 case), `rescopedTimestamp` is updated but 
 ```json
 { "kind" : "MERGED", "autoMerge" : false, "createdTimestamp" : ..., "hash" : "06cfd630...", "userId" : "..." }
 ```
-`hash` = the merge commit (main tip after merge) — always present, even for `ff`.
+`hash` = the merge commit (main tip after merge) — present for a normal merge
+(including `ff`). **Exceptional: stacked/dependent PRs.** When PR `A`
+(`b1 → main`) is open and PR `B` (`b2 → main`, where `b2` descends from `b1`)
+is merged, Bitbucket flips `A` to `state=MERGED` and records a commit-less
+`MERGED` activity on it (`autoMerge=false`, **no `hash` key at all**). The admin
+export reproduces that exactly — `hash` is omitted, not empty/null. Repro'd on
+9.4.18 in the lab (`FIX/golden` PR4/PR5). `MERGED.hash` therefore appears only
+when the activity carried a `commit` object in REST.
 
 ### 6.7 Git layout
 
@@ -402,7 +409,7 @@ Archive `kind` is NOT a 1:1 rename of REST `action`. Observed derivations:
 | `UNAPPROVED` | `ACTIVITY/UNAPPROVED` (no REVIEWERS:UPDATED observed on withdraw) |
 | `REVIEWED` (NEEDS_WORK) | `ACTIVITY/REVIEWED` |
 | `DECLINED` | `ACTIVITY/DECLINED` |
-| `MERGED` | `MERGED` (with `hash` + `autoMerge`) |
+| `MERGED` | `MERGED` (with `hash` + `autoMerge`); **no `hash` key** when REST carried no `commit` (stacked/dependent PR, §6.6) |
 | `RESCOPED` | `RESCOPED` |
 | `REVIEWERS_UPDATED` | `REVIEWERS:UPDATED` (addedIds/removedIds) |
 | `COMMENTED` (ADDED) | `COMMENT:ADDED` (full snapshot) |

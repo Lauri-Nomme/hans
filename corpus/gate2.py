@@ -11,6 +11,8 @@ import json
 import sys
 from pathlib import Path
 
+PR_IDS = (1, 2, 3, 4, 5, 6, 7)
+
 
 def load(d, name):
     p = Path(d) / "rest" / f"{name}.json"
@@ -58,7 +60,7 @@ def norm_act(a):
 
 def check_prs(A, B, verbosity=1):
     fails = 0
-    for pid in (1, 2, 3, 4, 5):
+    for pid in PR_IDS:
         pa, pb = load(A, f"pr_{pid}"), load(B, f"pr_{pid}")
         if pa is None or pb is None:
             print(f"PR{pid}: missing on one side (A={pa is not None} B={pb is not None})")
@@ -89,7 +91,7 @@ def load_pr(d, pid):
 
 def check_activities(A, B):
     fails = 0
-    for pid in (1, 2, 3, 4, 5):
+    for pid in PR_IDS:
         aa, ab = load(A, f"pr_{pid}_activities"), load(B, f"pr_{pid}_activities")
         if aa is None or ab is None:
             print(f"PR{pid} activities: missing on one side")
@@ -184,7 +186,7 @@ def check_tasks(A, B):
     fidelity. Comment ids differ (target reallocates), so compare by task text
     with severity/state and (for resolved) resolvedDate/resolver slug."""
     fails = 0
-    for pid in (1, 2, 3, 4, 5):
+    for pid in PR_IDS:
         aa, ab = load(A, f"pr_{pid}_activities"), load(B, f"pr_{pid}_activities")
         if aa is None or ab is None:
             continue

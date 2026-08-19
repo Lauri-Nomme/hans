@@ -79,6 +79,9 @@ C3b feat: add explore placeholder page                    (alan)  <- main tip
 - `feature/explore` = C3b + C11/C12 (explore.md with ADDED/REMOVED/CONTEXT lines
   for inline-comment anchors)
 - `feature/declined` = C3b + C13 (grace)
+- `feature/stacked/base` = C3b + S1 (stacked.md) — the "base" PR of the stacked pair
+- `feature/stacked/dependent` = feature/stacked/base + S2/S3 (stacked.md + dependent.txt) —
+  descends from the base so its merge carries the base commits into main
 - `v1.0` lightweight tag on C1.
 
 ## PR layer (prs.sh)
@@ -88,8 +91,16 @@ C3b feat: add explore placeholder page                    (alan)  <- main tip
 | 1  | feature/login | MERGED (merge_commit) | reviewers added+removed (alan), approvals grace+alan (author ada cannot), top-level comment + reply + edit, inline ADDED + file-level comments, title/desc edit (UPDATED), merge commit, **resolved task (BLOCKER)** |
 | 2  | hotfix/critical | MERGED (ff → merge commit) | reviewer grace; "ff" strategy yields a merge commit on 9.4.18 (`ae33424`), NOT a fast-forward |
 | 3  | experiment/squash | MERGED (squash) | squash = merge commit with branch tip as 2nd parent (`72fad40`/`6a304a6`) |
-| 4  | feature/explore | OPEN (RESCOPED) | inline ADDED/REMOVED/CONTEXT/file-level comments, force-push RESCOPED, drift-re-anchored added-line comment, title edit after push, grace approve→withdraw→re-approve, alan NEEDS_WORK, **open task (BLOCKER)** |
-| 5  | feature/declined | DECLINED | ada approve + comment + withdraw, hard-deleted comment, decline activity |
+| 4  | feature/stacked/base | MERGED (phantom) | **stacked-pair "remotely merged"**: open PR whose dependent PR5 (descendant branch) was merged; REST gives `state=MERGED` + a **commit-less MERGED activity** (`autoMerge=false`, no `commit`); the admin export omits `hash` entirely. Top-level comment survives |
+| 5  | feature/stacked/dependent | MERGED (merge_commit) | **stacked-pair dependent**: merged normally with `hash`; reviewer alan |
+| 6  | feature/explore | OPEN (RESCOPED) | inline ADDED/REMOVED/CONTEXT/file-level comments, force-push RESCOPED, drift-re-anchored added-line comment, title edit after push, grace approve→withdraw→re-approve, alan NEEDS_WORK, **open task (BLOCKER)** |
+| 7  | feature/declined | DECLINED | ada approve + comment + withdraw, hard-deleted comment, decline activity |
+
+> PR ids 4/5 are the stacked pair (created before PR4/PR5 of the earlier 5-PR
+> corpus). PR4/PR5 of that older corpus are now PR 6/7 here. Reviewer states on
+> PR 6 are set **last** because the stacked merge (PR 5) advances main and
+> resets open-PR reviewer states — the stacked pair is deliberately created and
+> merged *before* PR 6's final state ops.
 
 - Commit-level comment on C2 (anchored to src/util.py) — observe whether/how the
   real export encodes it.
@@ -141,13 +152,18 @@ Archive layout (repo `id` = 15):
 Verified pairing facts (`corpus/compare.py`):
 
 - PR metadata `state`/`title`/`description`/`fromRef.latestCommit`/`toRef.latestCommit`
-  exactly match the REST `pull-requests?state=ALL&withAttributes=true` dumps (PR1-5 all match).
+  exactly match the REST `pull-requests?state=ALL&withAttributes=true` dumps (PR1-7 all match;
+  note the stacked pair PR4 flips to `state=MERGED` in BOTH views, so the pairing holds there too).
 - **Archive activities use a DIFFERENT schema than REST `/activities`**:
   archive records `kind` ∈ `COMMENT:ADDED`, `COMMENT:OTHER` (comment edits), `ACTIVITY`,
   `REVIEWERS:UPDATED` (review/approve state changes), `RESCOPED`, `MERGED`;
   REST uses `action` ∈ `OPENED`, `UPDATED`, `COMMENTED`, `APPROVED`, `UNAPPROVED`,
   `REVIEWED`, `RESCOPED`, `MERGED`, `DECLINED`. Counts therefore differ:
-  PR1 archive=15 rest=12, PR4 archive=14 rest=13; others equal. Archive activity count
+  PR1 archive=15 rest=12, PR6 archive=14 rest=13; PR2/3/4/5/7 equal. Archive activity count
   is NOT derivable 1:1 from REST activities — Phase 3 must map each archive `kind` back
   to the REST events that produced it (e.g. a REST `COMMENTED` with a comment edit yields
   one `COMMENT:ADDED` + `COMMENT:OTHER`).
+- **Stacked-pair phantom merge (PR4)**: the export's PR4 activities =
+  `COMMENT:ADDED` + `ACTIVITY/OPENED` + `MERGED` (no `hash` key); REST = OPENED +
+  COMMENTED + MERGED (no `commit`). Exactly one `MERGED` in each view. Verified
+  byte-exact via gate1 (PR4 activities match with no diff notes).

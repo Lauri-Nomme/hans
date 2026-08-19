@@ -6,6 +6,7 @@ REST /activities, so counts are NOT expected to be equal).
 """
 import gzip
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -13,15 +14,26 @@ HERE = Path(__file__).resolve().parent
 ARCH = HERE.parent / "ground-truth" / "export-a"
 
 
+def _archive_repo_id():
+    """Repo id inside the export (changes per lab re-create)."""
+    root = ARCH / "com.atlassian.bitbucket.server.bitbucket-instance-migration_pullRequests" / "repository"
+    if not root.exists():
+        return None
+    return next((p.name for p in root.iterdir() if p.is_dir()), None)
+
+
 def main():
+    rid = _archive_repo_id()
+    if not rid:
+        raise SystemExit("export archive not present (ground-truth/export-a)")
     rest_prs = {p["id"]: p
                 for p in json.loads((HERE / "rest" / "pull-requests_FIX_golden.json").read_text())}
     failures = 0
     for pid in sorted(rest_prs):
         meta_p = (ARCH / "com.atlassian.bitbucket.server.bitbucket-instance-migration_pullRequests"
-                  / "repository" / "15" / "pullrequest" / str(pid) / "metadata.json.atl.gz")
+                  / "repository" / rid / "pullrequest" / str(pid) / "metadata.json.atl.gz")
         acts_p = (ARCH / "com.atlassian.bitbucket.server.bitbucket-instance-migration_pullRequests"
-                  / "repository" / "15" / "pullrequest" / str(pid) / "activities.json.atl.gz")
+                  / "repository" / rid / "pullrequest" / str(pid) / "activities.json.atl.gz")
         if not meta_p.exists():
             print(f"PR{pid}: no archive metadata — archive predates this PR")
             continue

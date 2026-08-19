@@ -218,6 +218,37 @@ EOF
   git add declined.md
   mkcommit "Alan Turing" "alan@example.com" "Alan Turing" "alan@example.com" "2024-04-01T09:00:00+00:00" "feat: declined experiment"
 
+  # stacked pair: base + dependent (PR A open, PR B merged -> PR A gets a
+  # commit-less MERGED activity, the "remotely merged" effect). dependent
+  # MUST descend from base so its merge carries the base commits into main.
+  git checkout -q main
+  git branch feature/stacked/base
+  git checkout -q feature/stacked/base
+  cat > stacked.md <<'EOF'
+# Stacked feature (base)
+
+Base PR of a stacked pair.
+EOF
+  git add stacked.md
+  mkcommit "Ada Lovelace" "ada@example.com" "Ada Lovelace" "ada@example.com" "2024-04-05T09:00:00+00:00" "feat: stacked base branch (PR A)"
+
+  git checkout -qb feature/stacked/dependent feature/stacked/base
+  cat > stacked.md <<'EOF'
+# Stacked feature (base)
+
+Base PR of a stacked pair.
+
+## Dependent additions
+Built on top of the base branch.
+EOF
+  git add stacked.md
+  mkcommit "Grace Hopper" "grace@example.com" "Grace Hopper" "grace@example.com" "2024-04-06T10:00:00+00:00" "feat: stacked dependent branch (PR B)"
+  cat > dependent.txt <<'EOF'
+dependent-only file
+EOF
+  git add dependent.txt
+  mkcommit "Alan Turing" "alan@example.com" "Alan Turing" "alan@example.com" "2024-04-07T11:00:00+00:00" "feat: stacked dependent additions"
+
   # lightweight tag v1.0 -> C1
   git tag v1.0 "$C1"
 
@@ -229,9 +260,10 @@ EOF
   push_branches "ada:ada-pw-123" \
     "+refs/heads/main" "+refs/heads/feature/login" "+refs/heads/hotfix/critical" \
     "+refs/heads/experiment/squash" "+refs/heads/feature/explore" "+refs/heads/feature/declined" \
+    "+refs/heads/feature/stacked/base" "+refs/heads/feature/stacked/dependent" \
     "+refs/tags/v1.0"
 
-  log "git layer pushed (main + 5 feature branches + lightweight tag v1.0)"
+  log "git layer pushed (main + 7 feature branches + lightweight tag v1.0)"
 
   # default branch is NOT auto-set when a repo is created empty via REST;
   # without it merge-listener errors ("No default branch is defined") occur.

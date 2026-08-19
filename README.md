@@ -69,7 +69,9 @@ bb-archiver validate  -> schema self-check of the tar
 - `fixtures/` — scripted golden repo ("FIX/golden") on lab instance `bb-lab-a`:
   branches, tags, force pushes, all PR terminal states, approvals, inline
   comments with orphaned anchors, tasks (BLOCKER comments), unicode/emoji,
-  merged-PR-with-deleted-branch (known-bad case). Fully reproducible.
+  merged-PR-with-deleted-branch (known-bad case), and a **stacked-PR pair**
+  (base PR flips to a commit-less MERGED when its dependent PR merges).
+  Fully reproducible.
 - `corpus/` — paired capture of **both views** of every entity: raw REST dumps
   next to the extracted real admin export, indexed by `manifest.json`.
 - `ground-truth/export-a/` — the extracted real admin export of FIX/golden, the
