@@ -78,6 +78,8 @@ Scope: single project, single git repo. Multi-repo archives repeat the per-repo 
   **Email is NOT carried in the archive's user id strings.** The only email
   fidelity in the whole archive is inside git author/committer objects — which is
   what GitHub attribution/mannequin reclaim keys off. Preserve git identities exactly.
+  Root cause, verified against the exporter: `UserEntityExportMapping.getExportId()`
+  hardcodes the email slot to null and never reads `getEmailAddress()` (see §6.6).
 
 ## 4. Timestamps
 
@@ -219,6 +221,51 @@ present when the participant has an approval/needs-work state (REST participant
 
 Pretty JSON array. **Ordering rule (verified): all comment records first
 (chronological), then all non-comment records (chronological).** Reproduce it.
+
+`userId` production — why there is no email (verified against the exporter
+source, Bitbucket 9.4.18 core):
+
+- The exporter plugin is **Bitbucket core**, declared in
+  `app/WEB-INF/classes/bitbucket-plugins/instance-migration.xml`
+  (plugin key `com.atlassian.bitbucket.server.bitbucket-instance-migration`,
+  handler `pullRequests` → `PullRequestExporter`), compiled into
+  `bitbucket-service-impl-9.4.18.jar` (`com.atlassian.stash.internal.migration.*`).
+  It is NOT the bundled cloud-migration assistant
+  (`bitbucket-migration-plugin-2.6.38.jar`, key
+  `com.atlassian.bitbucket.migration.bitbucket-migration-plugin`), which targets
+  server→cloud.
+- The archive activity JSON is written by `JsonExportingActivityVisitor`: it
+  builds a `PullRequestActivityMetadata` bean (`action`, `createdTimestamp`,
+  `userId`) and Jackson-serializes it with `writeObject`.
+- **Every user reference in the PR export routes through the same producer** —
+  activity `userId`, comment `authorId`, task `resolverId`, participant/reviewer
+  `userId`, permission `userIds`, `REVIEWERS:UPDATED` added/removedIds:
+  ```java
+  // BasePullRequestActivityMetadata.toExportId(ctx, user)
+  ctx.getEntityMapping(StandardMigrationEntityType.USER).getExportId(user.getId())
+  ```
+- `UserEntityExportMapping.getExportId(Integer)` (in the same jar) builds the
+  pipe-joined string:
+  ```java
+  Stream.of(user.getName(),          // slug        e.g. "admin"
+            user.getDisplayName(),   // full name        "Lab Admin"
+            null,                    // ← email slot: hardcoded null (bytecode
+                                     //   aconst_null; it NEVER reads
+                                     //   getEmailAddress())
+            user.getType().name())   //               "NORMAL"
+        .map(part -> part == null ? "" : part.replace("|", "\\|"))
+        .collect(Collectors.joining("|"));
+  ```
+  So the export format **reserves an email position but always leaves it empty** —
+  email is deliberately omitted at the source, by design (this is why the archive's
+  third field is always empty).
+- Corollaries that follow from the same design:
+  - PR metadata has `"author": null` and only `allParticipants` (also `userId`
+    composite).
+  - Inactive users get the same composite; only the `type`/slug/displayName vary.
+  - The only email fidelity in the whole system is inside **git author/committer
+    objects**, which is what GitHub attribution/mannequin reclaim keys off —
+    preserve git identities exactly (see §3).
 
 Record schemas (all alphabetical keys, all carry `createdTimestamp` + `userId`):
 
