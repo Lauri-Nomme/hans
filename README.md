@@ -254,7 +254,10 @@ theorized:
 - **Users import as stub accounts** (displayName=slug, no email) — expected
   Bitbucket import behavior. The only email fidelity in the whole archive is in
   git author/committer objects, which is what GitHub attribution / mannequin
-  reclaim keys off, so git identities are preserved exactly.
+  reclaim keys off, so git identities are preserved exactly. **Verified live**:
+  GEI still produces reclaimable `type: Mannequin` users for PR/comment/
+  participant identities even though the archive carries no user emails — see
+  `docs/mannequin-experiment.md` + `lab/mannequin-experiment.sh`.
 - **`nodeId`** (export job node) and all tar mtimes are export-time artifacts —
   benign Gate-1 noise.
 - **PR tasks**: there is no `/tasks` REST endpoint on 9.4.18, but tasks exist as

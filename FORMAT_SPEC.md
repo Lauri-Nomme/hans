@@ -80,6 +80,10 @@ Scope: single project, single git repo. Multi-repo archives repeat the per-repo 
   what GitHub attribution/mannequin reclaim keys off. Preserve git identities exactly.
   Root cause, verified against the exporter: `UserEntityExportMapping.getExportId()`
   hardcodes the email slot to null and never reads `getEmailAddress()` (see §6.6).
+  **GitHub-side consequence, verified live**: GEI still creates reclaimable
+  `type: Mannequin` users for PR/comment/participant identities without emails
+  (commit attribution rides the git object email). Reproduce with
+  `lab/mannequin-experiment.sh` — see `docs/mannequin-experiment.md`.
 
 ## 4. Timestamps
 
