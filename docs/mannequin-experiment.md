@@ -7,7 +7,9 @@
 `type: Mannequin` users for PR/comment/participant identities even though every
 `userId` in the archive is `slug|displayName||NORMAL` with the email slot empty.
 The git author/committer email is additionally preserved inside the git objects,
-powering commit attribution.
+powering commit attribution. The mannequins were then **reclaimed end-to-end**
+(more below) — invite the real account into the org by email, reattribute the
+mannequin, and commit + PR-comment attribution both flip to the real user.
 
 ## Background (why this needs testing)
 
@@ -79,11 +81,58 @@ reclaim), not something exposed via the public REST members endpoints. The
 experiment's contract is: the mannequins *exist and are attributed*; running the
 reclaim is a manual org-owner action against the GitHub UI.
 
+## Reclaim (mannequin -> real user) — completed end-to-end
+
+Observed live on 2026-08-21. The mannequins are listed at
+`https://github.com/organizations/{org}/settings/import-export` beside a
+**Reattribute** button. The reclaim has three stages:
+
+1. **Create the target GH account + get it into the org.** Reattributing only
+   lets you pick an *existing org member*. Create the account, then invite by
+   email (works even before the account exists; matches on the verified contact
+   email), and have them accept the membership invite.
+
+   ```bash
+   # owner, admin:org PAT:
+   GH_TOKEN="$(cat /path/to/token)" gh api --method POST orgs/{org}/invitations \
+     -f email="artjom.velosipedov@locals.tf" -f role="direct_member"
+   # -> pending until the account accepts
+   ```
+
+   Note: `gh api` uses the CLI's own auth by default; export `GH_TOKEN` (or pass
+   `-H "Authorization: token $PAT"`) — the `gho_` CLI token here lacked
+   `admin:org`.
+
+2. **Reattribute the mannequin to the member** (UI: Import/Export -> Reattribute
+   -> pick the member). This creates an **attribution invitation** shown at
+   `https://github.com/orgs/{org}/attribution-invitations`.
+   - Commit attribution flips **immediately** (the git re-writing happens
+     server-side, email-matched).
+   - PR/comment/review attribution stays on the mannequin until the target
+     **accepts the attribution invitation** (sign in as the target account, open
+     that URL, Accept). State was *pending* until then.
+
+3. **After acceptance** everything points at the real user (verified):
+
+   ```bash
+   gh api orgs/{org}/members --jq '.[].login'                       # artjom joined
+   gh api repos/{org}/manitest/commits --jq '.[] | {sha, author: .author.login, email: .commit.author.email}'
+   gh api repos/{org}/manitest/issues/1/timeline --jq '.[] | {event, actor: .actor.login}'
+   ```
+
+   Result: PR comment actor `AHyUu476q81BwrsGr8xFy2EPfqcUdNQvHxX26XT` ->
+   `atrjom-velosipedov`; commits `983d9b85` + `8db418d4` authored by
+   `atrjom-velosipedov` with `commit.author.email = artjom.velosipedov@locals.tf`.
+
 ## Caveats
 
 - The `unapplicable` / `admin` BB identities become mannequins too (they aren't
   GH org members). Use a BB user that maps to a real GH identity only if you want
   a *matched* (non-mannequin) result.
+- The GH account login does **not** need to match the BB slug — the match is
+  email-driven. Here the member is `atrjom-velosipedov` (GH login) while the BB
+  user is `artjom.velosipedov`; attribution still resolved because the emails
+  match.
 - `gh bbs2gh migrate-repo` requires `BBS_USERNAME`/`BBS_PASSWORD` env even when
   using `--archive-path` (it validates them; they're not used for fetching).
 - Migration logs (24 h retention) don't expose the mannequin-mapping details.
