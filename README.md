@@ -116,6 +116,13 @@ prebuilt binaries for **linux x86_64**, **windows x86_64**, and **macOS
 universal (arm64 + x86_64)**. See `tools/BUILD.md` for how they're built and
 re-produced.
 
+On macOS, the binaries are unsigned, so Gatekeeper quarantines them on first
+use. Clear it once with:
+
+```bash
+xattr -cr tools/bb-obj-tar/dist/bb-obj-tar-macos tools/bb-merge-base/dist/bb-merge-base-macos
+```
+
 Sources and destinations:
 
 | Thing | What you need |
