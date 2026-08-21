@@ -52,6 +52,7 @@ def _autodetect_obj_tar_bin():
     names = {
         "win32": "bb-obj-tar-windows-x86_64.exe",
         "linux": "bb-obj-tar-linux-x86_64",
+        "darwin": "bb-obj-tar-macos",
     }.get(sys.platform)
     if not names:
         return None
@@ -69,6 +70,7 @@ def _autodetect_merge_base_bin():
     names = {
         "win32": "bb-merge-base-windows-x86_64.exe",
         "linux": "bb-merge-base-linux-x86_64",
+        "darwin": "bb-merge-base-macos",
     }.get(sys.platform)
     if not names:
         return None

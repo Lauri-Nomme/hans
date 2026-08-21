@@ -110,6 +110,12 @@ bb-archiver validate  -> schema self-check of the tar
 Requirements: Python 3.10+ with `requests`, and a `git` binary. `bb-archiver`
 is a thin wrapper that loads `bb_archiver/` from the repo root.
 
+Optional Rust accelerators (`assemble` autodetects a binary for the current
+platform from `tools/*/dist/`; falls back to `git` otherwise): committed
+prebuilt binaries for **linux x86_64**, **windows x86_64**, and **macOS
+universal (arm64 + x86_64)**. See `tools/BUILD.md` for how they're built and
+re-produced.
+
 Sources and destinations:
 
 | Thing | What you need |

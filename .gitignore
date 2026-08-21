@@ -9,3 +9,7 @@ __pycache__/
 *.pyc
 tools/bb-obj-tar/target/
 tools/bb-merge-base/target/
+# Cross-compile cargo config carries machine-specific osxcross paths; the
+# recipe lives in tools/BUILD.md instead.
+tools/bb-obj-tar/.cargo/
+tools/bb-merge-base/.cargo/

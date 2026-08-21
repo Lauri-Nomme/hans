@@ -120,8 +120,10 @@ def main():
 
     if args.bin is None:
         cands = [
-            Path("tools/bb-merge-base/target/release/bb-merge-base"),
             Path("tools/bb-merge-base/dist/bb-merge-base-linux-x86_64"),
+            Path("tools/bb-merge-base/dist/bb-merge-base-macos"),
+            Path("tools/bb-merge-base/dist/bb-merge-base-windows-x86_64.exe"),
+            Path("tools/bb-merge-base/target/release/bb-merge-base"),
         ]
         args.bin = next((str(c) for c in cands if c.is_file()), None)
         if args.bin:
