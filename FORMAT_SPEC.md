@@ -266,6 +266,16 @@ source, Bitbucket 9.4.18 core):
   - The only email fidelity in the whole system is inside **git author/committer
     objects**, which is what GitHub attribution/mannequin reclaim keys off —
     preserve git identities exactly (see §3).
+- **Not dependent on active status.** The empty email slot appears for ALL
+  users, active or not. Lab proof: every golden-corpus user is `active=true`
+  with an email set (`ada@example.com`, `admin@lab.example.com`,
+  `alan@example.com`, `grace@example.com`), yet every exported `userId` still
+  reads `slug|displayName||NORMAL`. Bytecode: `getExportId` never calls
+  `isActive()`/`getEmailAddress()` — the slot is a hardcoded `aconst_null`.
+  (The active-dependent-email logic exists only in the SEPARATE server→cloud
+  migration path `UserTransformationsKt.toStashUser`
+  (`if (isActive) emailAddress else null`) — NOT in the local `.atl` exporter.
+  Do not conflate the two.)
 
 Record schemas (all alphabetical keys, all carry `createdTimestamp` + `userId`):
 
