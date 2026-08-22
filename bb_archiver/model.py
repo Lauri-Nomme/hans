@@ -19,11 +19,20 @@ class Model:
         self.repo = self.index["repo"]
         self.users = {}
         self.warnings = []
+        self._cache = {}
 
     # -- load raw dumps -----------------------------------------------------
     def _load(self, name):
+        """Read + parse a REST dump once, caching the result. These files are
+        immutable for the lifetime of the model, and several are re-read many
+        times per PR (activities in particular), so caching avoids redundant
+        disk reads + JSON parses."""
+        if name in self._cache:
+            return self._cache[name]
         p = self.rest / f"{name}.json"
-        return json.loads(p.read_text()) if p.exists() else None
+        data = json.loads(p.read_text()) if p.exists() else None
+        self._cache[name] = data
+        return data
 
     @property
     def project_id(self):
