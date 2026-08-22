@@ -307,26 +307,18 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Join parts: concatenate + 1024 zero bytes (end-of-archive marker).
-    let mut out = File::create(&out_path).map_err(|e| eprintln!("create out: {e}")).unwrap();
-    let mut part_files = Vec::new();
+    // Join parts: stream-concatenate + 1024 zero bytes (end-of-archive marker).
+    // Streamed part-by-part so memory stays O(part), never O(total archive).
+    let mut out = BufWriter::new(File::create(&out_path).map_err(|e| eprintln!("create out: {e}")).unwrap());
     for c in 0..nchunks {
         let part = out_path.with_extension(format!("part.{:03}", c));
-        part_files.push(part);
+        let mut f = BufReader::new(File::open(&part).unwrap());
+        std::io::copy(&mut f, &mut out).unwrap();
+        drop(f);
+        std::fs::remove_file(&part).unwrap();
     }
-    let mut buf = Vec::new();
-    for part in &part_files {
-        let mut f = BufReader::new(File::open(part).unwrap());
-        let mut chunk = Vec::new();
-        f.read_to_end(&mut chunk).unwrap();
-        buf.extend_from_slice(&chunk);
-    }
-    buf.resize(buf.len() + 1024, 0);
-    out.write_all(&buf).unwrap();
+    out.write_all(&[0u8; 1024]).unwrap();
     drop(out);
-    for part in &part_files {
-        let _ = std::fs::remove_file(part);
-    }
     eprintln!(
         "[objtar] wrote {} ({} entries, {:.1}s)",
         out_path.display(),
