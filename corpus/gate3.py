@@ -348,11 +348,12 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     todo = sorted(p["id"] for p in prs)[:limit_prs] if limit_prs else sorted(p["id"] for p in prs)
     todo = [n for n in todo if n not in done]
     total = len(todo)
+    pr_by_id = {p["id"]: p for p in prs}
     for i, n in enumerate(todo, 1):
         reviews = client.get(f"/repos/{org_repo}/pulls/{n}/reviews", {"per_page": 100}) or []
         comments = client.get(f"/repos/{org_repo}/issues/{n}/comments", {"per_page": 100}) or []
         # reviewers expected from BB scrape
-        bb = next((p for p in prs if p["id"] == n), {})
+        bb = pr_by_id.get(n, {})
         bb_rev = sorted(r.get("user", {}).get("slug") or r.get("user", {}).get("name")
                         for r in (bb.get("reviewers") or []))
         gh_rev = sorted({r.get("user", {}).get("login") for r in reviews

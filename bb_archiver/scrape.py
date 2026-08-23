@@ -108,7 +108,9 @@ class Api:
                 time.sleep(wait)
         raise RuntimeError(f"gave up after {retries} retries: {path}")
 
-    def paginate(self, path, params=None, per_page=100):
+    def paginate(self, path, params=None, per_page=1000):
+        """Page through a collection. Bitbucket caps `limit` at 1000, so request
+        the largest page to minimize REST round-trips (and rate-limit overhead)."""
         params = dict(params or {})
         values, start = [], 0
         while True:
