@@ -200,10 +200,23 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
 
 
 def git_mirror_url(base, user, password, project, repo):
-    url = f"{base}/scm/{project}/{repo}.git"
-    if "@" not in url:
-        url = url.replace("://", f"://{user}:{password}@", 1)
-    return url
+    # Auth is delivered via an HTTP Basic header (_git_auth_args), NOT by
+    # embedding credentials in the URL (tokens with '+', '=', '/' get mangled
+    # by URL decoding and the fetch redirects to a login page). The trailing
+    # slash is stripped so a --base ending in '/' does not produce a doubled
+    # '//scm/' path (which 404s/redirects and aborts the fetch).
+    return f"{base.rstrip('/')}/scm/{project}/{repo}.git"
+
+
+def _git_auth_args(user, password):
+    """git -c args to send credentials as a Basic header.
+
+    Returns [] when no user is given."""
+    import base64
+    if not user:
+        return []
+    tok = base64.b64encode(f"{user}:{password}".encode()).decode()
+    return ["-c", f"http.extraHeader=Authorization: Basic {tok}"]
 
 
 def fetch_mirror(git_dir, base, user, password, project, repo, index, git="git"):
@@ -211,9 +224,17 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index, git="git")
     if not (os.path.isdir(os.path.join(git_dir, "objects"))):
         subprocess.run([git, "init", "--bare", "--quiet", git_dir], check=True)
     url = git_mirror_url(base, user, password, project, repo)
-    subprocess.run([git, "remote", "add", "origin", url], check=True, cwd=git_dir)
+    auth = _git_auth_args(user, password)
+    r = subprocess.run([git, "remote", "get-url", "origin"], cwd=git_dir,
+                       capture_output=True)
+    if r.returncode == 0:
+        subprocess.run([git, "remote", "set-url", "origin", url], check=True,
+                       cwd=git_dir)
+    else:
+        subprocess.run([git, "remote", "add", "origin", url], check=True,
+                       cwd=git_dir)
     # fetch everything incl. PR refs (commits/trees/blobs/tags come from here)
-    subprocess.run([git, "-c", "remote.origin.fetch=", "fetch",
+    subprocess.run([git, *auth, "-c", "remote.origin.fetch=", "fetch",
                     "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*",
                     "+refs/pull-requests/*:refs/pull-requests/*",
                     "+refs/stash-refs/*:refs/stash-refs/*"],
