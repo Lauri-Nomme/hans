@@ -265,6 +265,23 @@ def _check_refname(git_dir, name, git="git"):
     return r.returncode == 0
 
 
+def _current_refs(git_dir, git="git"):
+    """{refname: sha} of every ref present in the mirror, in one pass.
+
+    Used to decide which refs still need writing on a resume, independent of
+    whether the object is already present (an object can be in the odb yet not
+    reachable from any ref — e.g. a prior run fetched it by SHA but crashed
+    before update-ref)."""
+    p = subprocess.run([git, "for-each-ref", "--format=%(refname) %(objectname)"],
+                       capture_output=True, text=True, cwd=git_dir)
+    out = {}
+    for line in p.stdout.splitlines():
+        if line.strip():
+            name, _, obj = line.partition(" ")
+            out[name] = obj
+    return out
+
+
 def _apply_refs_batch(git_dir, refs, batch_limit=10, git="git"):
     """Write `refs` ([(name, sha), ...]) so they are reachable, using the
     batched `git update-ref --stdin` fast path.
@@ -353,8 +370,8 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
                    check=True, cwd=git_dir)
 
     # sub-phases 2+3: recover the hidden but REST-referenced commits.
-    # Compute the delta in one pass against the entire mirror object set, rather
-    # than probing each candidate SHA individually.
+    # Compute the fetch delta in one pass against the entire mirror object set
+    # (rather than probing each candidate SHA individually)...
     avail = _available_objects(git_dir, git)
     missing = [(name, sha) for name, sha in needed_refs if sha not in avail]
     if missing:
@@ -368,16 +385,24 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
                  f"/{len(shas)}")
             subprocess.run([git, *auth, "fetch", "origin", *batch], check=True,
                            cwd=git_dir, capture_output=True)
-        # make them reachable so repack cannot drop them from the object store.
+
+    # ...then ALWAYS make the refs correct, keyed on REF state not object
+    # presence. A resumed run can have the objects present (a prior run fetched
+    # them by SHA) yet the refs missing (it crashed before update-ref); in that
+    # case the objects are dangling and repack would drop them from the archive.
+    current = _current_refs(git_dir, git)
+    to_ref = [(n, s) for n, s in needed_refs if current.get(n) != s]
+    if to_ref:
+        _log(f"git mirror: writing {len(to_ref)} ref(s) "
+             f"({len(missing)} object(s) were missing and fetched)")
         # See _apply_refs_batch: batched fast path, recursive bisection on
         # failure, per-ref bottom-out only for small sets.
-        wrote = _apply_refs_batch(git_dir, missing, git=git)
-        _log(f"git mirror: fetched {len(shas)} hidden object(s), "
-             f"wrote {wrote} ref(s)" +
-             (f", {len(missing) - wrote} skipped"
-              if wrote != len(missing) else ""))
+        wrote = _apply_refs_batch(git_dir, to_ref, git=git)
+        _log(f"git mirror: wrote {wrote} ref(s)" +
+             (f", {len(to_ref) - wrote} skipped"
+              if wrote != len(to_ref) else ""))
     else:
-        _log("git mirror: no hidden objects missing (main fetch was complete)")
+        _log("git mirror: refs already correct; nothing to write")
 
     _log(f"git mirror ready at {git_dir}")
     return git_dir
