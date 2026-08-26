@@ -5,6 +5,7 @@ loose objects, PR metadata/activities, permissions, caches, hierarchy markers.
 """
 import gzip
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -414,23 +415,58 @@ class Emitter:
             lines.append(f"{old} {new} Bitbucket Mesh <bitbucket.mesh@atlassian.com> {ts} +0000\n")
         return "".join(lines).encode()
 
+    def _available_objects(self):
+        """Set of every object sha present in the git mirror (loose + packed),
+        or None when the mirror is unavailable (cannot check -> keep refs)."""
+        if not getattr(self, "_avail_objs_ready", False):
+            self._avail_objs_ready = True
+            self._avail_objs = None
+            gitdir = self.m.dir / "git"
+            if (gitdir / "objects").exists():
+                try:
+                    p = subprocess.run(
+                        ["git", "cat-file", "--batch-all-objects",
+                         "--batch-check=%(objectname)"],
+                        capture_output=True, text=True, cwd=gitdir)
+                    self._avail_objs = {l.strip()
+                                        for l in p.stdout.splitlines() if l.strip()}
+                except Exception:
+                    self._avail_objs = None
+        return self._avail_objs
+
+    def _add_ref(self, entries, name, sha, kind):
+        """Write a ref only if its target object exists in the mirror. A REST
+        branch/tag tip can point at an object the git mirror lacks (snapshots
+        taken at different moments) — emitting it yields a dangling ref that
+        breaks import ('missing object ... for refs/...'). Drop + warn instead.
+        """
+        avail = self._available_objects()
+        if avail is not None and sha not in avail:
+            msg = (f"dropping {kind} ref {name}: object {sha} not present in "
+                   f"git mirror (scrape-time race) — emitting it would break import")
+            self.m.warnings.append(msg)
+            _log(f"WARN: {msg}")
+            return
+        entries[name] = sha.encode() + b"\n"
+
     def git_metadata(self):
         entries = {"HEAD": b"ref: refs/heads/main\n",
                    "config": CONFIG_BYTES,
                    "app-info/gc.pid": b"499@bd157217c6d7"}
         for b in self.m.branches() or []:
             display = b.get("displayId") or b["id"].replace("refs/heads/", "")
-            entries[f"refs/heads/{display}"] = b["latestCommit"].encode() + b"\n"
+            self._add_ref(entries, f"refs/heads/{display}",
+                          b["latestCommit"], "branch")
         for t in self.m.tags() or []:
             display = t.get("displayId") or t["id"].replace("refs/tags/", "")
             target = t.get("hash") or t["latestCommit"]   # annotated -> tag object
-            entries[f"refs/tags/{display}"] = target.encode() + b"\n"
+            self._add_ref(entries, f"refs/tags/{display}", target, "tag")
         for pr in self.m.prs() or []:
             if pr.get("state") == "OPEN":
-                yield_path = f"refs/pull-requests/{pr['id']}/from"
-                entries[yield_path] = pr["fromRef"]["latestCommit"].encode() + b"\n"
-            entries[f"stash-refs/pull-requests/{pr['id']}/from"] = \
-                pr["fromRef"]["latestCommit"].encode() + b"\n"
+                self._add_ref(entries, f"refs/pull-requests/{pr['id']}/from",
+                              pr["fromRef"]["latestCommit"], "pulls")
+            self._add_ref(entries, f"stash-refs/pull-requests/{pr['id']}/from",
+                          pr["fromRef"]["latestCommit"], "pulls")
             entries[f"logs/stash-refs/pull-requests/{pr['id']}/from"] = \
                 self._reflog(pr, self.m.activities(pr["id"]) or [])
         return _gzbuf(_tar_buf(entries))
@@ -619,10 +655,22 @@ class Emitter:
                     if i % 25 == 0 or i == total:
                         _log(f"PR {i}/{total} done")
                 add(f"_/repository/hierarchy_end/{self.hid}", b"")
+            self._write_warnings(out_path)
             _log(f"assembled {out_path}")
             return out_path
         finally:
             os.unlink(objtar_name)
+
+    def _write_warnings(self, out_path):
+        """Emit assemble-time warnings (e.g. dropped dangling refs) as JSON
+        lines next to the archive so they surface in the verification report."""
+        if not self.m.warnings:
+            return
+        wpath = Path(str(out_path) + ".warnings.jsonl")
+        with open(wpath, "w", encoding="utf-8") as f:
+            for w in self.m.warnings:
+                f.write(json.dumps({"warning": w}) + "\n")
+        _log(f"archive: {len(self.m.warnings)} warning(s) -> {wpath}")
 
 
 CONFIG_BYTES = (
