@@ -13,11 +13,20 @@ full comment objects) cover them. (The corpus tool `corpus/capture.py` fetches
 the extra dumps for supervision; the production scraper does not.)
 
 Branches and tags ARE also present in the git mirror (refs/heads/*, refs/tags/*),
-but we fetch them via REST too: they are a single paginated call each (negligible
+but they fetch them via REST too: they are called one paginated call each (negligible
 vs per-PR activities), and the tags dump carries the annotated-vs-lightweight
 distinction (`hash` for the tag object vs `latestCommit` for the peeled commit)
 that the archive's refs/tags/* files require. The real scale cost — and the part
 that is genuinely REST-only — is the per-PR activity stream.
+
+**Git mirror completeness:** Bitbucket does NOT advertise every object over the
+git protocol. In particular `refs/stash-refs/*` (which carries the historical
+source-tip of every PR, incl. merged/declined PRs whose branch was later
+deleted) is never advertised, so a plain `git fetch` never transports those
+commits — yet the REST activity/fromRef references them. `git upload-pack` CAN
+still serve an arbitrary object given its SHA, so the mirror post-processes the
+main fetch by SHA-fetching any commit the archive will reference that the main
+fetch did not already obtain. See `fetch_mirror`.
 
 Scalable: paginated everywhere, rate-limit aware (honors X-RateLimit-*),
 retry/backoff, and resumable via a checkpoint file (completed PR ids), so a run
@@ -155,10 +164,10 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
     save("users", api.paginate("/rest/api/1.0/users"), "/rest/api/1.0/users")
 
     # --- branches + tags (paginated; refs also present in the git mirror) ----
-    save(f"branches_{project}_{repo}", api.paginate(f"{rest_path}/branches"),
-         f"{rest_path}/branches")
-    save(f"tags_{project}_{repo}", api.paginate(f"{rest_path}/tags"),
-         f"{rest_path}/tags")
+    branches = api.paginate(f"{rest_path}/branches")
+    tags = api.paginate(f"{rest_path}/tags")
+    save(f"branches_{project}_{repo}", branches, f"{rest_path}/branches")
+    save(f"tags_{project}_{repo}", tags, f"{rest_path}/tags")
 
     # --- pull requests (paginated) ------------------------------------------
     prs = api.paginate(f"{rest_path}/pull-requests", {"state": "ALL", "withAttributes": True})
@@ -193,7 +202,25 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
 
     # --- git mirror ----------------------------------------------------------
     if git_dir is not None:
-        fetch_mirror(git_dir, base, user, password, project, repo, index)
+        # Derive the exact ref set the archive will emit, so we can guarantee the
+        # mirror contains every object behind a REST-referenced SHA. The main
+        # advertised fetch misses historical PR source-tips (hidden stash-refs);
+        # fetch_mirror SHA-fetches only what is still missing and writes the refs.
+        needed_refs = []
+        for b in branches:
+            display = b.get("displayId") or b["id"].replace("refs/heads/", "")
+            needed_refs.append((f"refs/heads/{display}", b["latestCommit"]))
+        for t in tags:
+            display = t.get("displayId") or t["id"].replace("refs/tags/", "")
+            target = t.get("hash") or t["latestCommit"]   # annotated -> tag object
+            needed_refs.append((f"refs/tags/{display}", target))
+        for p in prs:
+            sha = p["fromRef"]["latestCommit"]
+            if p.get("state") == "OPEN":
+                needed_refs.append((f"refs/pull-requests/{p['id']}/from", sha))
+            needed_refs.append((f"stash-refs/pull-requests/{p['id']}/from", sha))
+        fetch_mirror(git_dir, base, user, password, project, repo, index,
+                     needed_refs=needed_refs)
 
     (out / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
     return index
@@ -206,18 +233,61 @@ def git_mirror_url(base, user, password, project, repo):
     return url
 
 
-def fetch_mirror(git_dir, base, user, password, project, repo, index, git="git"):
+def _object_exists(git_dir, sha, git="git"):
+    r = subprocess.run([git, "cat-file", "-e", sha], cwd=git_dir,
+                       capture_output=True)
+    return r.returncode == 0
+
+
+def fetch_mirror(git_dir, base, user, password, project, repo, index,
+                 needed_refs=(), fetch_batch=50, git="git"):
+    """Build the bare mirror + guarantee object completeness.
+
+    Sub-phases (in order):
+      1. init + `git fetch origin` of every advertised ref namespace.
+      2. SHA-fetch any ref the archive will emit whose object the main fetch
+         did NOT already obtain (Bitbucket hides refs/stash-refs/* but still
+         serves arbitrary objects by SHA).
+      3. `git update-ref` the fetched SHAs so they are *reachable* — otherwise
+         `git repack -adf` in the emitter would treat them as dangling and drop
+         them from the object store.
+    """
     git_dir = str(git_dir)
     if not (os.path.isdir(os.path.join(git_dir, "objects"))):
         subprocess.run([git, "init", "--bare", "--quiet", git_dir], check=True)
     url = git_mirror_url(base, user, password, project, repo)
     subprocess.run([git, "remote", "add", "origin", url], check=True, cwd=git_dir)
-    # fetch everything incl. PR refs (commits/trees/blobs/tags come from here)
+    # sub-phase 1: everything currently advertised (commits/trees/blobs/tags).
+    # refs/stash-refs/* advertises nothing; kept in the spec for symmetry.
     subprocess.run([git, "-c", "remote.origin.fetch=", "fetch",
                     "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*",
                     "+refs/pull-requests/*:refs/pull-requests/*",
                     "+refs/stash-refs/*:refs/stash-refs/*"],
                    check=True, cwd=git_dir)
+
+    # sub-phases 2+3: recover the hidden but REST-referenced commits.
+    missing = [(name, sha) for name, sha in needed_refs
+               if not _object_exists(git_dir, sha, git)]
+    if missing:
+        shas = sorted(set(sha for _, sha in missing))
+        _log(f"git mirror: {len(missing)} ref(s) reference objects the main "
+             f"fetch did not carry; SHA-fetching {len(shas)} unique object(s) "
+             f"(Bitbucket hides refs/stash-refs/*)")
+        for i in range(0, len(shas), fetch_batch):
+            batch = shas[i:i + fetch_batch]
+            _log(f"git mirror: sha-fetch {i + 1}-{min(i + fetch_batch, len(shas))}"
+                 f"/{len(shas)}")
+            subprocess.run([git, "fetch", "origin", *batch], check=True,
+                           cwd=git_dir, capture_output=True)
+        # make them reachable so repack cannot drop them from the object store
+        for name, sha in missing:
+            subprocess.run([git, "update-ref", name, sha], check=True,
+                           cwd=git_dir, capture_output=True)
+        _log(f"git mirror: fetched {len(shas)} hidden object(s), "
+             f"wrote {len(missing)} ref(s)")
+    else:
+        _log("git mirror: no hidden objects missing (main fetch was complete)")
+
     _log(f"git mirror ready at {git_dir}")
     return git_dir
 
