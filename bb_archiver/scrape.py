@@ -263,6 +263,47 @@ def _check_refname(git_dir, name, git="git"):
     r = subprocess.run([git, "check-ref-format", name], cwd=git_dir,
                        capture_output=True)
     return r.returncode == 0
+
+
+def _apply_refs_batch(git_dir, refs, batch_limit=10, git="git"):
+    """Write `refs` ([(name, sha), ...]) so they are reachable, using the
+    batched `git update-ref --stdin` fast path.
+
+    update-ref --stdin is batch-atomic: one invalid refname aborts the whole
+    group. Rather than fall back to one subprocess per ref (slow for ~3k with a
+    handful bad), on failure we recursively split the set and retry both halves,
+    stopping recursion at `batch_limit` items, below which each ref is validated
+    (check-ref-format) and written individually.
+    Returns count of refs successfully written.
+    """
+    if not refs:
+        return 0
+    lines = "".join(f"update {n} {s}\n" for n, s in refs)
+    r = subprocess.run([git, "update-ref", "--stdin"], input=lines,
+                       text=True, cwd=git_dir, capture_output=True)
+    if r.returncode == 0:
+        return len(refs)
+    if len(refs) <= batch_limit:
+        # bottom out: isolate the bad one(s) individually, authoritative check
+        wrote = 0
+        for n, s in refs:
+            if not _check_refname(git_dir, n, git):
+                _log(f"git mirror: warning: invalid ref name {n!r} — object "
+                     f"{s} unreachable (dropped from archive)")
+                continue
+            rr = subprocess.run([git, "update-ref", n, s], cwd=git_dir,
+                                capture_output=True)
+            if rr.returncode == 0:
+                wrote += 1
+            else:
+                _log(f"git mirror: warning: could not write {n!r}: "
+                     f"{rr.stderr.strip()[:160]}")
+        return wrote
+    # recursive bisection: the batch failed; retry on each half
+    mid = len(refs) // 2
+    _log(f"git mirror: update-ref batch failed on {len(refs)} refs — splitting")
+    return (_apply_refs_batch(git_dir, refs[:mid], batch_limit, git)
+            + _apply_refs_batch(git_dir, refs[mid:], batch_limit, git))
     p = subprocess.run([git, "cat-file", "--batch-all-objects",
                         "--batch-check=%(objectname)"],
                        capture_output=True, text=True, cwd=git_dir)
@@ -320,32 +361,9 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
             subprocess.run([git, *auth, "fetch", "origin", *batch], check=True,
                            cwd=git_dir, capture_output=True)
         # make them reachable so repack cannot drop them from the object store.
-        # Batch all ref writes through a single `git update-ref --stdin` (one
-        # process, not one per commit). The batch is atomic: a single bad
-        # refname aborts it, so on failure we fall back to per-ref writes
-        # (validated by `git check-ref-format`) to still salvage the good ones.
-        lines = "".join(f"update {n} {s}\n" for n, s in missing)
-        r = subprocess.run([git, "update-ref", "--stdin"], input=lines,
-                           text=True, cwd=git_dir, capture_output=True)
-        if r.returncode == 0:
-            wrote = len(missing)
-        else:
-            _log(f"git mirror: batch update-ref failed ("
-                 f"{r.stderr.strip()[:200]}); falling back per-ref")
-            applied = 0
-            for n, s in missing:
-                if not _check_refname(git_dir, n, git):
-                    _log(f"git mirror: warning: invalid ref name {n!r} — "
-                         f"object {s} unreachable (dropped from archive)")
-                    continue
-                rr = subprocess.run([git, "update-ref", n, s], cwd=git_dir,
-                                    capture_output=True)
-                if rr.returncode == 0:
-                    applied += 1
-                else:
-                    _log(f"git mirror: warning: could not write {n!r}: "
-                         f"{rr.stderr.strip()[:160]}")
-            wrote = applied
+        # See _apply_refs_batch: batched fast path, recursive bisection on
+        # failure, per-ref bottom-out only for small sets.
+        wrote = _apply_refs_batch(git_dir, missing, git=git)
         _log(f"git mirror: fetched {len(shas)} hidden object(s), "
              f"wrote {wrote} ref(s)" +
              (f", {len(missing) - wrote} skipped"
