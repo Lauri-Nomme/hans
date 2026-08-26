@@ -13,11 +13,20 @@ full comment objects) cover them. (The corpus tool `corpus/capture.py` fetches
 the extra dumps for supervision; the production scraper does not.)
 
 Branches and tags ARE also present in the git mirror (refs/heads/*, refs/tags/*),
-but we fetch them via REST too: they are a single paginated call each (negligible
+but they fetch them via REST too: they are called one paginated call each (negligible
 vs per-PR activities), and the tags dump carries the annotated-vs-lightweight
 distinction (`hash` for the tag object vs `latestCommit` for the peeled commit)
 that the archive's refs/tags/* files require. The real scale cost — and the part
 that is genuinely REST-only — is the per-PR activity stream.
+
+**Git mirror completeness:** Bitbucket does NOT advertise every object over the
+git protocol. In particular `refs/stash-refs/*` (which carries the historical
+source-tip of every PR, incl. merged/declined PRs whose branch was later
+deleted) is never advertised, so a plain `git fetch` never transports those
+commits — yet the REST activity/fromRef references them. `git upload-pack` CAN
+still serve an arbitrary object given its SHA, so the mirror post-processes the
+main fetch by SHA-fetching any commit the archive will reference that the main
+fetch did not already obtain. See `fetch_mirror`.
 
 Scalable: paginated everywhere, rate-limit aware (honors X-RateLimit-*),
 retry/backoff, and resumable via a checkpoint file (completed PR ids), so a run
@@ -155,10 +164,10 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
     save("users", api.paginate("/rest/api/1.0/users"), "/rest/api/1.0/users")
 
     # --- branches + tags (paginated; refs also present in the git mirror) ----
-    save(f"branches_{project}_{repo}", api.paginate(f"{rest_path}/branches"),
-         f"{rest_path}/branches")
-    save(f"tags_{project}_{repo}", api.paginate(f"{rest_path}/tags"),
-         f"{rest_path}/tags")
+    branches = api.paginate(f"{rest_path}/branches")
+    tags = api.paginate(f"{rest_path}/tags")
+    save(f"branches_{project}_{repo}", branches, f"{rest_path}/branches")
+    save(f"tags_{project}_{repo}", tags, f"{rest_path}/tags")
 
     # --- pull requests (paginated) ------------------------------------------
     prs = api.paginate(f"{rest_path}/pull-requests", {"state": "ALL", "withAttributes": True})
@@ -193,31 +202,283 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
 
     # --- git mirror ----------------------------------------------------------
     if git_dir is not None:
-        fetch_mirror(git_dir, base, user, password, project, repo, index)
+        # Derive the exact ref set the archive will emit, so we can guarantee the
+        # mirror contains every object behind a REST-referenced SHA. The main
+        # advertised fetch misses historical PR source-tips (hidden stash-refs);
+        # fetch_mirror SHA-fetches only what is still missing and writes the refs.
+        needed_refs = []
+        for b in branches:
+            display = b.get("displayId") or b["id"].replace("refs/heads/", "")
+            needed_refs.append((f"refs/heads/{display}", b["latestCommit"]))
+        for t in tags:
+            display = t.get("displayId") or t["id"].replace("refs/tags/", "")
+            target = t.get("hash") or t["latestCommit"]   # annotated -> tag object
+            needed_refs.append((f"refs/tags/{display}", target))
+        for p in prs:
+            sha = p["fromRef"]["latestCommit"]
+            if p.get("state") == "OPEN":
+                needed_refs.append((f"refs/pull-requests/{p['id']}/from", sha))
+            needed_refs.append((f"refs/stash-refs/pull-requests/{p['id']}/from", sha))
+        fetch_mirror(git_dir, base, user, password, project, repo, index,
+                     needed_refs=needed_refs)
 
     (out / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
     return index
 
 
 def git_mirror_url(base, user, password, project, repo):
-    url = f"{base}/scm/{project}/{repo}.git"
-    if "@" not in url:
-        url = url.replace("://", f"://{user}:{password}@", 1)
-    return url
+    # Auth is delivered via an HTTP Basic header (_git_auth_args), NOT by
+    # embedding credentials in the URL (tokens with '+', '=', '/' get mangled
+    # by URL decoding and the fetch redirects to a login page).
+    return f"{base.rstrip('/')}/scm/{project}/{repo}.git"
 
 
-def fetch_mirror(git_dir, base, user, password, project, repo, index, git="git"):
+def _git_auth_args(user, password):
+    """git -c args to send credentials as a Basic header.
+
+    Embedding user:password in the fetch URL corrupts tokens containing URL
+    special characters (e.g. '+', '=', '/'), which makes the server redirect to
+    its login page and the fetch die. The Base header avoids re-encoding the
+    password entirely. Returns [] when no user is given."""
+    import base64
+    if not user:
+        return []
+    tok = base64.b64encode(f"{user}:{password}".encode()).decode()
+    return ["-c", f"http.extraHeader=Authorization: Basic {tok}"]
+
+
+def _available_objects(git_dir, git="git"):
+    """Set of every object sha present in the mirror (loose + packed).
+
+    Uses a single `git cat-file --batch-all-objects` instead of one
+    `cat-file -e` per SHA — O(repo) once, not O(n candidate SHAs)."""
+    p = subprocess.run([git, "cat-file", "--batch-all-objects",
+                        "--batch-check=%(objectname)"],
+                       capture_output=True, text=True, cwd=git_dir)
+    return {line.strip() for line in p.stdout.splitlines() if line.strip()}
+
+
+def _check_refname(git_dir, name, git="git"):
+    """Authoritative refname check via `git check-ref-format` (returns bool)."""
+    r = subprocess.run([git, "check-ref-format", name], cwd=git_dir,
+                       capture_output=True)
+    return r.returncode == 0
+
+
+def _write_refs_direct(git_dir, refs, git="git"):
+    """Write loose refs directly to the filesystem, bypassing `git update-ref`.
+
+    A loose ref in a bare repo is just the file <git_dir>/<refname> containing
+    "<sha>\\n". Writing it directly avoids update-ref --stdin's strict line
+    parser, which aborts the whole batch on refnames it dislikes (e.g. some
+    non-ASCII tag names). git repack walks these ref files for reachability, so
+    this keeps the objects retained. Any ref that is not a valid filesystem path
+    component is routed to refs/keep/<sha>.
+
+    Returns the number of refs written.
+    """
+    import re
+    wrote = 0
+    for name, sha in refs:
+        if not _valid_refname(name):
+            synth = f"refs/keep/{sha}"
+            _log(f"git mirror: warning: ref name {name!r} not writable as a "
+                 f"loose ref — writing {synth!r} instead to retain {sha}")
+            name = synth
+        ref_path = os.path.join(git_dir, name.replace("/", os.sep))
+        os.makedirs(os.path.dirname(ref_path), exist_ok=True)
+        with open(ref_path, "w", encoding="ascii") as f:
+            f.write(f"{sha}\n")
+        wrote += 1
+    return wrote
+
+
+def _valid_refname(name):
+    """In-process refname validity check (fast, no subprocess), matching git's
+    check-ref-format rules. Used to route invalid names to SHA-keyed refs up
+    front so the update-ref batch only ever receives valid names (git's --stdin
+    is batch-atomic: one bad name aborts the whole group)."""
+    import re
+    # A usable refname for git must begin with refs/ (a bare "stash-refs/..."
+    # is not a valid ref); require it.
+    if not name.startswith("refs/"):
+        return False
+    if not name or name.startswith("/") or name.endswith("/") or "//" in name:
+        return False
+    if "/." in name or name.endswith(".lock"):
+        return False
+    if name[0] in ".~^:?*[":
+        return False
+    if "@{" in name:     # @{...} is reserved
+        return False
+    if ".." in name:
+        return False
+    bad = re.compile(r"[\x00-\x20\x7f]|[\\~^:?*\[\]]|\.\.")
+    if bad.search(name):
+        return False
+    if name.endswith("."):
+        return False
+    return True
+
+
+def _current_refs(git_dir, git="git"):
+    """{refname: sha} of every ref present in the mirror, in one pass.
+
+    Used to decide which refs still need writing on a resume, independent of
+    whether the object is already present (an object can be in the odb yet not
+    reachable from any ref — e.g. a prior run fetched it by SHA but crashed
+    before update-ref)."""
+    p = subprocess.run([git, "for-each-ref", "--format=%(refname) %(objectname)"],
+                       capture_output=True, text=True, cwd=git_dir)
+    out = {}
+    for line in p.stdout.splitlines():
+        if line.strip():
+            name, _, obj = line.partition(" ")
+            out[name] = obj
+    return out
+
+
+def _apply_refs_batch(git_dir, refs, batch_limit=10, git="git"):
+    """Write `refs` ([(name, sha), ...]) so they are reachable, using the
+    batched `git update-ref --stdin` fast path.
+
+    Invalid refnames are routed to SHA-keyed refs (refs/keep/<sha>) up front by
+    an in-process check, so the batch only ever sees valid names. On the rare
+    genuine batch failure, git's stderr is logged, then the set is recursively
+    split and both halves retried, bottoming out at `batch_limit` items where
+    each ref is validated authoritatively (check-ref-format) and written
+    individually.
+    Returns count of refs successfully written.
+    """
+    if not refs:
+        return 0
+    lines = "".join(f"update {n} {s}\n" for n, s in refs)
+    r = subprocess.run([git, "update-ref", "--stdin"], input=lines,
+                       text=True, cwd=git_dir, capture_output=True)
+    if r.returncode == 0:
+        return len(refs)
+    _log(f"git mirror: update-ref batch failed on {len(refs)} refs:\n"
+         f"    {r.stderr.strip()[:1000]}")
+    if len(refs) <= batch_limit:
+        # bottom out: isolate the bad one(s) individually, authoritative check
+        wrote = 0
+        for n, s in refs:
+            if not _check_refname(git_dir, n, git):
+                # Mirror ref only exists to keep the object reachable for repack.
+                synth = f"refs/keep/{s}"
+                rr = subprocess.run([git, "update-ref", synth, s], cwd=git_dir,
+                                    capture_output=True)
+                if rr.returncode == 0:
+                    _log(f"git mirror: warning: ref name {n!r} is not a valid "
+                         f"git refname — wrote {synth!r} instead to retain {s}")
+                    wrote += 1
+                else:
+                    _log(f"git mirror: warning: could not write {synth!r}: "
+                         f"{rr.stderr.strip()[:160]}")
+                continue
+            rr = subprocess.run([git, "update-ref", n, s], cwd=git_dir,
+                                capture_output=True)
+            if rr.returncode == 0:
+                wrote += 1
+            else:
+                _log(f"git mirror: warning: could not write {n!r}: "
+                     f"{rr.stderr.strip()[:160]}")
+        return wrote
+    # recursive bisection: the batch failed; retry on each half
+    mid = len(refs) // 2
+    return (_apply_refs_batch(git_dir, refs[:mid], batch_limit, git)
+            + _apply_refs_batch(git_dir, refs[mid:], batch_limit, git))
+
+
+def fetch_mirror(git_dir, base, user, password, project, repo, index,
+                 needed_refs=(), fetch_batch=50, git="git"):
+    """Build the bare mirror + guarantee object completeness.
+
+    Sub-phases (in order):
+      1. init + `git fetch origin` of every advertised ref namespace.
+      2. SHA-fetch any ref the archive will emit whose object the main fetch
+         did NOT already obtain (Bitbucket hides refs/stash-refs/* but still
+         serves arbitrary objects by SHA).
+      3. `git update-ref` the fetched SHAs so they are *reachable* — otherwise
+         `git repack -adf` in the emitter would treat them as dangling and drop
+         them from the object store.
+    """
     git_dir = str(git_dir)
     if not (os.path.isdir(os.path.join(git_dir, "objects"))):
         subprocess.run([git, "init", "--bare", "--quiet", git_dir], check=True)
     url = git_mirror_url(base, user, password, project, repo)
-    subprocess.run([git, "remote", "add", "origin", url], check=True, cwd=git_dir)
-    # fetch everything incl. PR refs (commits/trees/blobs/tags come from here)
-    subprocess.run([git, "-c", "remote.origin.fetch=", "fetch",
+    auth = _git_auth_args(user, password)
+    r = subprocess.run([git, "remote", "get-url", "origin"], cwd=git_dir,
+                       capture_output=True)
+    if r.returncode == 0:
+        subprocess.run([git, "remote", "set-url", "origin", url], check=True,
+                       cwd=git_dir)
+    else:
+        subprocess.run([git, "remote", "add", "origin", url], check=True,
+                       cwd=git_dir)
+    # sub-phase 1: everything currently advertised (commits/trees/blobs/tags).
+    # refs/stash-refs/* advertises nothing; kept in the spec for symmetry.
+    subprocess.run([git, *auth, "-c", "remote.origin.fetch=", "fetch",
                     "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*",
                     "+refs/pull-requests/*:refs/pull-requests/*",
                     "+refs/stash-refs/*:refs/stash-refs/*"],
                    check=True, cwd=git_dir)
+
+    # sub-phases 2+3: recover the hidden but REST-referenced commits.
+    # Compute the fetch delta in one pass against the entire mirror object set
+    # (rather than probing each candidate SHA individually)...
+    avail = _available_objects(git_dir, git)
+    missing = [(name, sha) for name, sha in needed_refs if sha not in avail]
+    if missing:
+        shas = sorted(set(sha for _, sha in missing))
+        _log(f"git mirror: {len(missing)} ref(s) reference objects the main "
+             f"fetch did not carry; SHA-fetching {len(shas)} unique object(s) "
+             f"(Bitbucket hides refs/stash-refs/*)")
+        for i in range(0, len(shas), fetch_batch):
+            batch = shas[i:i + fetch_batch]
+            _log(f"git mirror: sha-fetch {i + 1}-{min(i + fetch_batch, len(shas))}"
+                 f"/{len(shas)}")
+            subprocess.run([git, *auth, "fetch", "origin", *batch], check=True,
+                           cwd=git_dir, capture_output=True)
+
+    # ...then ALWAYS make the refs correct, keyed on REF state not object
+    # presence. A resumed run can have the objects present (a prior run fetched
+    # them by SHA) yet the refs missing (it crashed before update-ref); in that
+    # case the objects are dangling and repack would drop them from the archive.
+    # Re-snapshot objects AFTER the fetch loop so a fresh SHA-fetch is included.
+    avail = _available_objects(git_dir, git)
+    current = _current_refs(git_dir, git)
+    to_ref = []
+    unfetchable = []
+    for n, s in needed_refs:
+        if current.get(n) == s:
+            continue                    # already correct
+        if s not in avail:
+            unfetchable.append((n, s))  # object absent even after fetch
+        else:
+            to_ref.append((n, s))       # object present: writable
+    for n, s in unfetchable:
+        _log(f"git mirror: warning: object {s} for {n} is not present and could "
+             f"not be fetched — ref skipped (object will not be in the archive)")
+    if unfetchable and missing:
+        _log(f"git mirror: {len(unfetchable)} ref(s) refer to objects that are "
+             f"absent even after the SHA-fetch and were dropped \u2014 review the "
+             f"warn lines above")
+    elif unfetchable:
+        _log(f"git mirror: {len(unfetchable)} ref(s) refer to objects absent "
+             f"from the mirror on this run; they were skipped (see warnings)")
+    if to_ref:
+        _log(f"git mirror: writing {len(to_ref)} ref(s) directly to filesystem")
+        wrote = _write_refs_direct(git_dir, to_ref, git=git)
+        _log(f"git mirror: wrote {wrote} ref(s) via filesystem" +
+             (f", {len(to_ref) - wrote} skipped"
+              if wrote != len(to_ref) else ""))
+    else:
+        _log("git mirror: refs already correct; nothing to write")
+
+    _log(f"git mirror ready at {git_dir}")
+    return git_dir
+
     _log(f"git mirror ready at {git_dir}")
     return git_dir
 
