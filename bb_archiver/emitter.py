@@ -298,7 +298,12 @@ class Emitter:
                 others.append(self._ev("MERGED", ts, slug, OrderedDict(items)))
             else:
                 others.append(self._ev("ACTIVITY", ts, slug, {"action": action}))
-        comments.sort(key=lambda e: e["createdTimestamp"])
+        # Comment records preserve natural emission order (per REST activity),
+        # so a COMMENT:ADDED always precedes its own EDITED/REPLIED markers.
+        # Sorting them by createdTimestamp is wrong: ADDED uses the activity
+        # time but EDITED/REPLIED use the comment's own dates, so an edit can
+        # sort before the ADDED carrying the referenced comment, which breaks
+        # import. Non-comment records are still ordered chronologically.
         others.sort(key=lambda e: e["createdTimestamp"])
         return _gzbuf(jw.pretty(comments + others).encode())
 
