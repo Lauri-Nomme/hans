@@ -265,6 +265,34 @@ def _check_refname(git_dir, name, git="git"):
     return r.returncode == 0
 
 
+def _write_refs_direct(git_dir, refs, git="git"):
+    """Write loose refs directly to the filesystem, bypassing `git update-ref`.
+
+    A loose ref in a bare repo is just the file <git_dir>/<refname> containing
+    "<sha>\\n". Writing it directly avoids update-ref --stdin's strict line
+    parser, which aborts the whole batch on refnames it dislikes (e.g. some
+    non-ASCII tag names). git repack walks these ref files for reachability, so
+    this keeps the objects retained. Any ref that is not a valid filesystem path
+    component is routed to refs/keep/<sha>.
+
+    Returns the number of refs written.
+    """
+    import re
+    wrote = 0
+    for name, sha in refs:
+        if not _valid_refname(name):
+            synth = f"refs/keep/{sha}"
+            _log(f"git mirror: warning: ref name {name!r} not writable as a "
+                 f"loose ref — writing {synth!r} instead to retain {sha}")
+            name = synth
+        ref_path = os.path.join(git_dir, name.replace("/", os.sep))
+        os.makedirs(os.path.dirname(ref_path), exist_ok=True)
+        with open(ref_path, "w", encoding="ascii") as f:
+            f.write(f"{sha}\n")
+        wrote += 1
+    return wrote
+
+
 def _valid_refname(name):
     """In-process refname validity check (fast, no subprocess), matching git's
     check-ref-format rules. Used to route invalid names to SHA-keyed refs up
@@ -427,15 +455,8 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
             continue                    # already correct
         if s not in avail:
             unfetchable.append((n, s))  # object absent even after fetch
-        elif not _valid_refname(n):
-            # Route invalid names to a valid SHA-keyed ref up front so the batch
-            # only ever sees names update-ref --stdin accepts.
-            synth = f"refs/keep/{s}"
-            _log(f"git mirror: warning: ref name {n!r} is not a valid git "
-                 f"refname — writing {synth!r} instead to retain {s}")
-            to_ref.append((synth, s))
         else:
-            to_ref.append((n, s))       # object present, valid name: writable
+            to_ref.append((n, s))       # object present: writable
     for n, s in unfetchable:
         _log(f"git mirror: warning: object {s} for {n} is not present and could "
              f"not be fetched — ref skipped (object will not be in the archive)")
@@ -447,13 +468,9 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
         _log(f"git mirror: {len(unfetchable)} ref(s) refer to objects absent "
              f"from the mirror on this run; they were skipped (see warnings)")
     if to_ref:
-        _log(f"git mirror: writing {len(to_ref)} ref(s)")
-        # See _apply_refs_batch: batched fast path, recursive bisection on
-        # failure, per-ref bottom-out only for small sets. With to_ref filtered
-        # to object-present refs, the only remaining failure class is an invalid
-        # refname — which is rare, so bisection stays fast.
-        wrote = _apply_refs_batch(git_dir, to_ref, git=git)
-        _log(f"git mirror: wrote {wrote} ref(s)" +
+        _log(f"git mirror: writing {len(to_ref)} ref(s) directly to filesystem")
+        wrote = _write_refs_direct(git_dir, to_ref, git=git)
+        _log(f"git mirror: wrote {wrote} ref(s) via filesystem" +
              (f", {len(to_ref) - wrote} skipped"
               if wrote != len(to_ref) else ""))
     else:
