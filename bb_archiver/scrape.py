@@ -233,10 +233,15 @@ def git_mirror_url(base, user, password, project, repo):
     return url
 
 
-def _object_exists(git_dir, sha, git="git"):
-    r = subprocess.run([git, "cat-file", "-e", sha], cwd=git_dir,
-                       capture_output=True)
-    return r.returncode == 0
+def _available_objects(git_dir, git="git"):
+    """Set of every object sha present in the mirror (loose + packed).
+
+    Uses a single `git cat-file --batch-all-objects` instead of one
+    `cat-file -e` per SHA — O(repo) once, not O(n candidate SHAs)."""
+    p = subprocess.run([git, "cat-file", "--batch-all-objects",
+                        "--batch-check=%(objectname)"],
+                       capture_output=True, text=True, cwd=git_dir)
+    return {line.strip() for line in p.stdout.splitlines() if line.strip()}
 
 
 def fetch_mirror(git_dir, base, user, password, project, repo, index,
@@ -266,8 +271,10 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
                    check=True, cwd=git_dir)
 
     # sub-phases 2+3: recover the hidden but REST-referenced commits.
-    missing = [(name, sha) for name, sha in needed_refs
-               if not _object_exists(git_dir, sha, git)]
+    # Compute the delta in one pass against the entire mirror object set, rather
+    # than probing each candidate SHA individually.
+    avail = _available_objects(git_dir, git)
+    missing = [(name, sha) for name, sha in needed_refs if sha not in avail]
     if missing:
         shas = sorted(set(sha for _, sha in missing))
         _log(f"git mirror: {len(missing)} ref(s) reference objects the main "
@@ -279,10 +286,12 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
                  f"/{len(shas)}")
             subprocess.run([git, "fetch", "origin", *batch], check=True,
                            cwd=git_dir, capture_output=True)
-        # make them reachable so repack cannot drop them from the object store
-        for name, sha in missing:
-            subprocess.run([git, "update-ref", name, sha], check=True,
-                           cwd=git_dir, capture_output=True)
+        # make them reachable so repack cannot drop them from the object store.
+        # Batch all ref writes through a single `git update-ref --stdin` (one
+        # process, not one per commit).
+        lines = "".join(f"update {name} {sha}\n" for name, sha in missing)
+        subprocess.run([git, "update-ref", "--stdin"], check=True,
+                       input=lines, text=True, cwd=git_dir, capture_output=True)
         _log(f"git mirror: fetched {len(shas)} hidden object(s), "
              f"wrote {len(missing)} ref(s)")
     else:
