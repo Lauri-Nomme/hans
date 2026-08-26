@@ -258,6 +258,17 @@ def _available_objects(git_dir, git="git"):
     return {line.strip() for line in p.stdout.splitlines() if line.strip()}
 
 
+def _check_refname(git_dir, name, git="git"):
+    """Authoritative refname check via `git check-ref-format` (returns bool)."""
+    r = subprocess.run([git, "check-ref-format", name], cwd=git_dir,
+                       capture_output=True)
+    return r.returncode == 0
+    p = subprocess.run([git, "cat-file", "--batch-all-objects",
+                        "--batch-check=%(objectname)"],
+                       capture_output=True, text=True, cwd=git_dir)
+    return {line.strip() for line in p.stdout.splitlines() if line.strip()}
+
+
 def fetch_mirror(git_dir, base, user, password, project, repo, index,
                  needed_refs=(), fetch_batch=50, git="git"):
     """Build the bare mirror + guarantee object completeness.
@@ -310,12 +321,35 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
                            cwd=git_dir, capture_output=True)
         # make them reachable so repack cannot drop them from the object store.
         # Batch all ref writes through a single `git update-ref --stdin` (one
-        # process, not one per commit).
-        lines = "".join(f"update {name} {sha}\n" for name, sha in missing)
-        subprocess.run([git, "update-ref", "--stdin"], check=True,
-                       input=lines, text=True, cwd=git_dir, capture_output=True)
+        # process, not one per commit). The batch is atomic: a single bad
+        # refname aborts it, so on failure we fall back to per-ref writes
+        # (validated by `git check-ref-format`) to still salvage the good ones.
+        lines = "".join(f"update {n} {s}\n" for n, s in missing)
+        r = subprocess.run([git, "update-ref", "--stdin"], input=lines,
+                           text=True, cwd=git_dir, capture_output=True)
+        if r.returncode == 0:
+            wrote = len(missing)
+        else:
+            _log(f"git mirror: batch update-ref failed ("
+                 f"{r.stderr.strip()[:200]}); falling back per-ref")
+            applied = 0
+            for n, s in missing:
+                if not _check_refname(git_dir, n, git):
+                    _log(f"git mirror: warning: invalid ref name {n!r} — "
+                         f"object {s} unreachable (dropped from archive)")
+                    continue
+                rr = subprocess.run([git, "update-ref", n, s], cwd=git_dir,
+                                    capture_output=True)
+                if rr.returncode == 0:
+                    applied += 1
+                else:
+                    _log(f"git mirror: warning: could not write {n!r}: "
+                         f"{rr.stderr.strip()[:160]}")
+            wrote = applied
         _log(f"git mirror: fetched {len(shas)} hidden object(s), "
-             f"wrote {len(missing)} ref(s)")
+             f"wrote {wrote} ref(s)" +
+             (f", {len(missing) - wrote} skipped"
+              if wrote != len(missing) else ""))
     else:
         _log("git mirror: no hidden objects missing (main fetch was complete)")
 
