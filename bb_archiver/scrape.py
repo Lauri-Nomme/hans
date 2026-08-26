@@ -405,6 +405,13 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
     for n, s in unfetchable:
         _log(f"git mirror: warning: object {s} for {n} is not present and could "
              f"not be fetched — ref skipped (object will not be in the archive)")
+    if unfetchable and missing:
+        _log(f"git mirror: {len(unfetchable)} ref(s) refer to objects that are "
+             f"absent even after the SHA-fetch and were dropped \u2014 review the "
+             f"warn lines above")
+    elif unfetchable:
+        _log(f"git mirror: {len(unfetchable)} ref(s) refer to objects absent "
+             f"from the mirror on this run; they were skipped (see warnings)")
     if to_ref:
         _log(f"git mirror: writing {len(to_ref)} ref(s)")
         # See _apply_refs_batch: batched fast path, recursive bisection on
