@@ -288,8 +288,20 @@ def _apply_refs_batch(git_dir, refs, batch_limit=10, git="git"):
         wrote = 0
         for n, s in refs:
             if not _check_refname(git_dir, n, git):
-                _log(f"git mirror: warning: invalid ref name {n!r} — object "
-                     f"{s} unreachable (dropped from archive)")
+                # The mirror ref only exists to keep the object reachable for
+                # repack; it does not need to match the archive's name. Replace
+                # the invalid name with a valid, SHA-keyed one so the object is
+                # still retained, and keep a warning.
+                synth = f"refs/keep/{s}"
+                rr = subprocess.run([git, "update-ref", synth, s], cwd=git_dir,
+                                    capture_output=True)
+                if rr.returncode == 0:
+                    _log(f"git mirror: warning: ref name {n!r} is not a valid "
+                         f"git refname — wrote {synth!r} instead to retain {s}")
+                    wrote += 1
+                else:
+                    _log(f"git mirror: warning: could not write {synth!r}: "
+                         f"{rr.stderr.strip()[:160]}")
                 continue
             rr = subprocess.run([git, "update-ref", n, s], cwd=git_dir,
                                 capture_output=True)
@@ -304,10 +316,6 @@ def _apply_refs_batch(git_dir, refs, batch_limit=10, git="git"):
     _log(f"git mirror: update-ref batch failed on {len(refs)} refs — splitting")
     return (_apply_refs_batch(git_dir, refs[:mid], batch_limit, git)
             + _apply_refs_batch(git_dir, refs[mid:], batch_limit, git))
-    p = subprocess.run([git, "cat-file", "--batch-all-objects",
-                        "--batch-check=%(objectname)"],
-                       capture_output=True, text=True, cwd=git_dir)
-    return {line.strip() for line in p.stdout.splitlines() if line.strip()}
 
 
 def fetch_mirror(git_dir, base, user, password, project, repo, index,
