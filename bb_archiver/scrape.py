@@ -227,10 +227,24 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
 
 
 def git_mirror_url(base, user, password, project, repo):
-    url = f"{base}/scm/{project}/{repo}.git"
-    if "@" not in url:
-        url = url.replace("://", f"://{user}:{password}@", 1)
-    return url
+    # Auth is delivered via an HTTP Basic header (_git_auth_args), NOT by
+    # embedding credentials in the URL (tokens with '+', '=', '/' get mangled
+    # by URL decoding and the fetch redirects to a login page).
+    return f"{base.rstrip('/')}/scm/{project}/{repo}.git"
+
+
+def _git_auth_args(user, password):
+    """git -c args to send credentials as a Basic header.
+
+    Embedding user:password in the fetch URL corrupts tokens containing URL
+    special characters (e.g. '+', '=', '/'), which makes the server redirect to
+    its login page and the fetch die. The Base header avoids re-encoding the
+    password entirely. Returns [] when no user is given."""
+    import base64
+    if not user:
+        return []
+    tok = base64.b64encode(f"{user}:{password}".encode()).decode()
+    return ["-c", f"http.extraHeader=Authorization: Basic {tok}"]
 
 
 def _available_objects(git_dir, git="git"):
@@ -261,10 +275,18 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
     if not (os.path.isdir(os.path.join(git_dir, "objects"))):
         subprocess.run([git, "init", "--bare", "--quiet", git_dir], check=True)
     url = git_mirror_url(base, user, password, project, repo)
-    subprocess.run([git, "remote", "add", "origin", url], check=True, cwd=git_dir)
+    auth = _git_auth_args(user, password)
+    r = subprocess.run([git, "remote", "get-url", "origin"], cwd=git_dir,
+                       capture_output=True)
+    if r.returncode == 0:
+        subprocess.run([git, "remote", "set-url", "origin", url], check=True,
+                       cwd=git_dir)
+    else:
+        subprocess.run([git, "remote", "add", "origin", url], check=True,
+                       cwd=git_dir)
     # sub-phase 1: everything currently advertised (commits/trees/blobs/tags).
     # refs/stash-refs/* advertises nothing; kept in the spec for symmetry.
-    subprocess.run([git, "-c", "remote.origin.fetch=", "fetch",
+    subprocess.run([git, *auth, "-c", "remote.origin.fetch=", "fetch",
                     "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*",
                     "+refs/pull-requests/*:refs/pull-requests/*",
                     "+refs/stash-refs/*:refs/stash-refs/*"],
@@ -284,7 +306,7 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
             batch = shas[i:i + fetch_batch]
             _log(f"git mirror: sha-fetch {i + 1}-{min(i + fetch_batch, len(shas))}"
                  f"/{len(shas)}")
-            subprocess.run([git, "fetch", "origin", *batch], check=True,
+            subprocess.run([git, *auth, "fetch", "origin", *batch], check=True,
                            cwd=git_dir, capture_output=True)
         # make them reachable so repack cannot drop them from the object store.
         # Batch all ref writes through a single `git update-ref --stdin` (one
