@@ -218,7 +218,7 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
             sha = p["fromRef"]["latestCommit"]
             if p.get("state") == "OPEN":
                 needed_refs.append((f"refs/pull-requests/{p['id']}/from", sha))
-            needed_refs.append((f"stash-refs/pull-requests/{p['id']}/from", sha))
+            needed_refs.append((f"refs/stash-refs/pull-requests/{p['id']}/from", sha))
         fetch_mirror(git_dir, base, user, password, project, repo, index,
                      needed_refs=needed_refs)
 
@@ -271,6 +271,10 @@ def _valid_refname(name):
     front so the update-ref batch only ever receives valid names (git's --stdin
     is batch-atomic: one bad name aborts the whole group)."""
     import re
+    # A usable refname for git must begin with refs/ (a bare "stash-refs/..."
+    # is not a valid ref); require it.
+    if not name.startswith("refs/"):
+        return False
     if not name or name.startswith("/") or name.endswith("/") or "//" in name:
         return False
     if "/." in name or name.endswith(".lock"):
