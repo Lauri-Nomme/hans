@@ -265,6 +265,30 @@ def _check_refname(git_dir, name, git="git"):
     return r.returncode == 0
 
 
+def _valid_refname(name):
+    """In-process refname validity check (fast, no subprocess), matching git's
+    check-ref-format rules. Used to route invalid names to SHA-keyed refs up
+    front so the update-ref batch only ever receives valid names (git's --stdin
+    is batch-atomic: one bad name aborts the whole group)."""
+    import re
+    if not name or name.startswith("/") or name.endswith("/") or "//" in name:
+        return False
+    if "/." in name or name.endswith(".lock"):
+        return False
+    if name[0] in ".~^:?*[":
+        return False
+    if "@{" in name:     # @{...} is reserved
+        return False
+    if ".." in name:
+        return False
+    bad = re.compile(r"[\x00-\x20\x7f]|[\\~^:?*\[\]]|\.\.")
+    if bad.search(name):
+        return False
+    if name.endswith("."):
+        return False
+    return True
+
+
 def _current_refs(git_dir, git="git"):
     """{refname: sha} of every ref present in the mirror, in one pass.
 
@@ -286,11 +310,12 @@ def _apply_refs_batch(git_dir, refs, batch_limit=10, git="git"):
     """Write `refs` ([(name, sha), ...]) so they are reachable, using the
     batched `git update-ref --stdin` fast path.
 
-    update-ref --stdin is batch-atomic: one invalid refname aborts the whole
-    group. Rather than fall back to one subprocess per ref (slow for ~3k with a
-    handful bad), on failure we recursively split the set and retry both halves,
-    stopping recursion at `batch_limit` items, below which each ref is validated
-    (check-ref-format) and written individually.
+    Invalid refnames are routed to SHA-keyed refs (refs/keep/<sha>) up front by
+    an in-process check, so the batch only ever sees valid names. On the rare
+    genuine batch failure, git's stderr is logged, then the set is recursively
+    split and both halves retried, bottoming out at `batch_limit` items where
+    each ref is validated authoritatively (check-ref-format) and written
+    individually.
     Returns count of refs successfully written.
     """
     if not refs:
@@ -300,15 +325,14 @@ def _apply_refs_batch(git_dir, refs, batch_limit=10, git="git"):
                        text=True, cwd=git_dir, capture_output=True)
     if r.returncode == 0:
         return len(refs)
+    _log(f"git mirror: update-ref batch failed on {len(refs)} refs:\n"
+         f"    {r.stderr.strip()[:1000]}")
     if len(refs) <= batch_limit:
         # bottom out: isolate the bad one(s) individually, authoritative check
         wrote = 0
         for n, s in refs:
             if not _check_refname(git_dir, n, git):
-                # The mirror ref only exists to keep the object reachable for
-                # repack; it does not need to match the archive's name. Replace
-                # the invalid name with a valid, SHA-keyed one so the object is
-                # still retained, and keep a warning.
+                # Mirror ref only exists to keep the object reachable for repack.
                 synth = f"refs/keep/{s}"
                 rr = subprocess.run([git, "update-ref", synth, s], cwd=git_dir,
                                     capture_output=True)
@@ -330,7 +354,6 @@ def _apply_refs_batch(git_dir, refs, batch_limit=10, git="git"):
         return wrote
     # recursive bisection: the batch failed; retry on each half
     mid = len(refs) // 2
-    _log(f"git mirror: update-ref batch failed on {len(refs)} refs — splitting")
     return (_apply_refs_batch(git_dir, refs[:mid], batch_limit, git)
             + _apply_refs_batch(git_dir, refs[mid:], batch_limit, git))
 
@@ -398,10 +421,17 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
     for n, s in needed_refs:
         if current.get(n) == s:
             continue                    # already correct
-        if s in avail:
-            to_ref.append((n, s))       # object present: writable ref
-        else:
+        if s not in avail:
             unfetchable.append((n, s))  # object absent even after fetch
+        elif not _valid_refname(n):
+            # Route invalid names to a valid SHA-keyed ref up front so the batch
+            # only ever sees names update-ref --stdin accepts.
+            synth = f"refs/keep/{s}"
+            _log(f"git mirror: warning: ref name {n!r} is not a valid git "
+                 f"refname — writing {synth!r} instead to retain {s}")
+            to_ref.append((synth, s))
+        else:
+            to_ref.append((n, s))       # object present, valid name: writable
     for n, s in unfetchable:
         _log(f"git mirror: warning: object {s} for {n} is not present and could "
              f"not be fetched — ref skipped (object will not be in the archive)")
