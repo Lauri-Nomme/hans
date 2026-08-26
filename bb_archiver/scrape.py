@@ -390,19 +390,36 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
     # presence. A resumed run can have the objects present (a prior run fetched
     # them by SHA) yet the refs missing (it crashed before update-ref); in that
     # case the objects are dangling and repack would drop them from the archive.
+    # Re-snapshot objects AFTER the fetch loop so a fresh SHA-fetch is included.
+    avail = _available_objects(git_dir, git)
     current = _current_refs(git_dir, git)
-    to_ref = [(n, s) for n, s in needed_refs if current.get(n) != s]
+    to_ref = []
+    unfetchable = []
+    for n, s in needed_refs:
+        if current.get(n) == s:
+            continue                    # already correct
+        if s in avail:
+            to_ref.append((n, s))       # object present: writable ref
+        else:
+            unfetchable.append((n, s))  # object absent even after fetch
+    for n, s in unfetchable:
+        _log(f"git mirror: warning: object {s} for {n} is not present and could "
+             f"not be fetched — ref skipped (object will not be in the archive)")
     if to_ref:
-        _log(f"git mirror: writing {len(to_ref)} ref(s) "
-             f"({len(missing)} object(s) were missing and fetched)")
+        _log(f"git mirror: writing {len(to_ref)} ref(s)")
         # See _apply_refs_batch: batched fast path, recursive bisection on
-        # failure, per-ref bottom-out only for small sets.
+        # failure, per-ref bottom-out only for small sets. With to_ref filtered
+        # to object-present refs, the only remaining failure class is an invalid
+        # refname — which is rare, so bisection stays fast.
         wrote = _apply_refs_batch(git_dir, to_ref, git=git)
         _log(f"git mirror: wrote {wrote} ref(s)" +
              (f", {len(to_ref) - wrote} skipped"
               if wrote != len(to_ref) else ""))
     else:
         _log("git mirror: refs already correct; nothing to write")
+
+    _log(f"git mirror ready at {git_dir}")
+    return git_dir
 
     _log(f"git mirror ready at {git_dir}")
     return git_dir
