@@ -1,6 +1,9 @@
 """bb-archiver CLI: scrape / assemble / validate."""
 import argparse
+import gzip
+import io
 import json
+import re
 import sys
 import tarfile
 import tempfile
@@ -81,9 +84,59 @@ def _autodetect_merge_base_bin():
     return None
 
 
+def _inner_map(data):
+    """Map of name -> bytes inside an inner (non-.gz or already-decompressed) tar."""
+    t = tarfile.open(fileobj=io.BytesIO(data), mode="r")
+    out = {}
+    for m in t.getmembers():
+        f = t.extractfile(m)
+        out[m.name] = f.read() if f else b""
+    return out
+
+
+def _check_ref_object_integrity(archive, problems):
+    """Every ref in each metadata.atl.tar.atl.gz must point at an object present
+    in the repo's objects.atl.tar. A dangling ref (REST snapshot at a different
+    moment than the git mirror, or a dropped object) makes the importer fail
+    with 'fatal: missing object ... for refs/...'."""
+    names = archive.getnames()
+    # group by repository dir: ...git_git/repositories/<rid>/...
+    rid_of = {}
+    for name in names:
+        m = re.search(r"/repositories/([^/]+)/", name)
+        if m:
+            rid_of[name] = m.group(1)
+    repos = {}
+    for name, rid in rid_of.items():
+        repos.setdefault(rid, {"meta": None, "objs": None})
+        if name.endswith("metadata.atl.tar.atl.gz"):
+            f = archive.extractfile(name)
+            repos[rid]["meta"] = gzip.decompress(f.read()) if f else b""
+        elif name.endswith("contents/objects.atl.tar") or name.endswith("objects.atl.tar"):
+            f = archive.extractfile(name)
+            repos[rid]["objs"] = f.read() if f else b""
+    for rid, r in repos.items():
+        if r["meta"] is None or r["objs"] is None:
+            problems.append(f"repo {rid}: missing metadata.atl.tar or "
+                            f"objects.atl.tar in archive")
+            continue
+        objs = {n.replace("/", "") for n in _inner_map(r["objs"])}
+        for refname, content in _inner_map(r["meta"]).items():
+            if not (refname.startswith("refs/") or
+                    refname.startswith("stash-refs/")):
+                continue
+            sha = content.decode("utf-8", "replace").strip()
+            if not sha:
+                continue
+            if sha not in objs:
+                problems.append(f"repo {rid}: ref {refname} -> missing object "
+                                f"{sha} (not in objects.atl.tar)")
+
+
 def cmd_validate(args):
     """Schema self-check vs FORMAT_SPEC: paths exist, JSON parses, pretty/compact
-    matches the documented styles, gzip headers sane."""
+    matches the documented styles, gzip headers sane, and no dangling refs
+    (every ref in metadata.atl.tar must resolve to an object in objects.atl.tar)."""
     problems = []
     with tarfile.open(args.archive) as tar:
         names = tar.getnames()
@@ -95,7 +148,7 @@ def cmd_validate(args):
                     problems.append(f"{name}: not gzip")
             elif name.endswith(".tar"):
                 pass
-        # instance-details must be present, parseable, archiveVersion=2
+        _check_ref_object_integrity(tar, problems)
     _log(f"validated {args.archive}: {len(problems)} problems")
     for p in problems:
         print("  ", p)
