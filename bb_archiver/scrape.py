@@ -93,6 +93,7 @@ class Api:
 
     def get(self, path, params=None, retries=4):
         url = path if path.startswith("http") else f"{self.base}{path}"
+        last = None
         for attempt in range(retries + 1):
             self._throttle()
             try:
@@ -104,18 +105,30 @@ class Api:
                     wait = max((self.reset or 0) - time.time() + 2, 30)
                     self._log(f"403 rate-limited — sleeping {int(wait)}s")
                     time.sleep(wait)
+                    last = "403 rate-limited"
                     continue
                 if r.status_code in (429, 500, 502, 503, 504):
                     wait = min(2 ** attempt * 2, 60)
                     self._log(f"HTTP {r.status_code} — retry in {wait}s")
                     time.sleep(wait)
+                    last = f"HTTP {r.status_code}"
                     continue
                 r.raise_for_status()
-            except (requests.RequestException, ConnectionError, TimeoutError):
+            except (requests.RequestException, ConnectionError, TimeoutError) as e:
+                # Every failure class is retried (transient 4xx happens, and a
+                # retry is free robustness), but the actual error is surfaced
+                # in the log so a permanently-bad request (404/401/400) is
+                # diagnosable from the output instead of masked by a generic
+                # "gave up" message.
+                last = f"{type(e).__name__}: {e}"
+                kind = "HTTP error" if isinstance(e, requests.HTTPError) \
+                    else "network error"
                 wait = min(2 ** attempt * 2, 60)
-                self._log(f"network error — retry in {wait}s")
+                self._log(f"warning: {kind}, retrying — {last} (retry in {wait}s)")
                 time.sleep(wait)
-        raise RuntimeError(f"gave up after {retries} retries: {path}")
+        raise RuntimeError(
+            f"gave up after {retries} retries: {path}"
+            + (f" — last error: {last}" if last else ""))
 
     def paginate(self, path, params=None, per_page=1000):
         """Page through a collection. Bitbucket caps `limit` at 1000, so request
