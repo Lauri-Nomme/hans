@@ -94,9 +94,14 @@ class Emitter:
         return _gzbuf(b'{"projectAdmin":false,"projectRead":false,"projectWrite":false}')
 
     def project_permissions(self):
+        """Permission levels are not REST-derivable without admin (the
+        /permissions endpoints reject normal users), so every harvested user
+        is granted the least-privilege level, PROJECT_READ (normal user) —
+        never PROJECT_ADMIN. A real export carries the true levels; the
+        import target's sysadmin retains global admin regardless."""
         perm = {
             "groups": [],
-            "permission": "PROJECT_ADMIN",
+            "permission": "PROJECT_READ",
             "userIds": [self.m.ref_id_for(slug) for slug in sorted(self.m.users)],
         }
         return _gzbuf(jw.compact([perm]).encode())

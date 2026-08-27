@@ -109,6 +109,11 @@ def compare(real_archive, syn_archive, report):
                 if _norm_instance(ja) == _norm_instance(jb):
                     report.note(f"{name}: same after instance-details normalization")
                     continue
+            if name.endswith("/permissions.json.atl.gz"):
+                if _norm_project_perms(ja) == _norm_project_perms(jb):
+                    report.note(f"{name}: same users; permission level is not "
+                                f"REST-derivable (roles need admin) — known gap")
+                    continue
             diff = _json_diff(ja, jb, report, jsonpath=name)
             continue
         # nothing may slip through unverified: a byte diff in a member that
@@ -128,6 +133,14 @@ def _norm_instance(a):
     a.pop("nodeId", None)
     a.pop("instanceName", None)
     return a
+
+
+def _norm_project_perms(j):
+    """Project-permission entries compared by user sets only: the permission
+    LEVEL is not derivable from REST (the /permissions endpoints require
+    admin), so the synthetic archive grants everyone PROJECT_READ (normal
+    user) while a real export carries the true levels."""
+    return sorted(",".join(sorted(e.get("userIds") or [])) for e in j)
 
 
 def _json_diff(a, b, report, jsonpath, path=""):

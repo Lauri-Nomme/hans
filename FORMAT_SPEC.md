@@ -151,13 +151,19 @@ Compact, alphabetical. Matches `GET .../repos/{slug}`:
 - `permissions/project/<pid>/all-permissions.json.atl.gz` — flags for the calling
   user (export initiator): `{"projectAdmin":false,"projectRead":false,"projectWrite":false}`.
   All false observed even for sysadmin (the migration context user has none).
-- `permissions/project/<pid>/permissions.json.atl.gz` — array:
+- `permissions/project/<pid>/permissions.json.atl.gz` — array; the real export
+  carries the project's true permission levels (the golden lab export granted
+  all four users `PROJECT_ADMIN`):
   ```json
   [{"groups":[],"permission":"PROJECT_ADMIN","userIds":["ada|Ada Lovelace||NORMAL","admin|Lab Admin||NORMAL","alan|Alan Turing||NORMAL","grace|Grace Hopper||NORMAL"]}]
   ```
   One entry per permission level (`PROJECT_ADMIN` etc.); `userIds` use the
   `slug|displayName||type` form; `groups` empty (no LDAP groups in lab).
   Alphabetical keys: `groups,permission,userIds`; userIds order = archive order.
+  **Levels are not REST-derivable** (the `/permissions` endpoints require
+  admin), so the assembler grants every harvested user the least-privilege
+  `PROJECT_READ` (normal user) in a single entry; Gate 1 compares userId sets
+  and notes the level as a known gap.
 - `permissions/repository/<rid>/permissions.json.atl.gz` — array; empty `[]` in lab.
 
 ### 6.4 git-lfs settings — `git-lfs_gitLfsSettings/<rid>/git-lfs-settings.json.atl.gz`
