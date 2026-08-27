@@ -80,7 +80,23 @@ def compare(real_archive, syn_archive, report):
                                 f"syn={len(mb.get(k,b''))}b")
             report.note(f"{name}: object sets differ (above)")
             continue
-        if name.endswith(".gz") and name.endswith(".json.atl.gz"):
+        if name.endswith(".atl.tar.atl.gz"):
+            # metadata.atl.tar (refs/reflogs/HEAD/config), caches.atl.tar
+            # (merge-base caches), hooks.atl.tar — every entry is exactly
+            # derivable per FORMAT_SPEC, so compare entry-wise; a diff here
+            # is genuine (e.g. a wrong ref or wrong merge-base), not noise.
+            ma, mb = _inner_map(a), _inner_map(b)
+            if ma == mb:
+                report.note(f"{name}: same entries after inner-tar compare "
+                            f"(byte layout differs)")
+                continue
+            for k in sorted(set(ma) | set(mb)):
+                if ma.get(k) != mb.get(k):
+                    report.fail(f"{name} entry {k!r}: "
+                                f"real={len(ma.get(k,b''))}b "
+                                f"syn={len(mb.get(k,b''))}b")
+            continue
+        if name.endswith(".json.atl.gz"):
             try:
                 ja, jb = _json_dict(a), _json_dict(b)
             except Exception:
@@ -94,8 +110,10 @@ def compare(real_archive, syn_archive, report):
                     report.note(f"{name}: same after instance-details normalization")
                     continue
             diff = _json_diff(ja, jb, report, jsonpath=name)
-        else:
-            report.note(f"{name}: raw byte diff (unclassified)")
+            continue
+        # nothing may slip through unverified: a byte diff in a member that
+        # has no classifier is a genuine difference until classified
+        report.fail(f"{name}: raw byte diff (unclassified member)")
 
 
 def _norm_participants(meta):
