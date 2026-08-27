@@ -37,7 +37,7 @@ Output layout (consumed by `assemble`):
                              PR list, per-PR detail+activities)
     <out>/users.json         harvested distinct users
     <out>/index.json         scrape metadata (base, project, repo, ids, prs)
-    <out>/checkpoint.json    resumable progress (PR ids completed)
+    <out>/checkpoint.jsonl   resumable progress (completed PR ids, one per line)
     <out>/git/               bare mirror clone incl. PR refs
 """
 import json
@@ -188,11 +188,26 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
          f"{rest_path}/pull-requests?state=ALL&withAttributes=true")
 
     # --- checkpoint / resume ------------------------------------------------
-    ckpt_path = out / "checkpoint.json"
+    # Append-only JSONL: one completed PR id per line, appended O(1) per PR.
+    # (The old format rewrote + re-sorted the full id set per PR — O(n^2),
+    # ~400 MB of redundant writes at 10k PRs.) A torn trailing line from a
+    # crash mid-append is tolerated on load; the legacy checkpoint.json is
+    # still honored for resume and left in place.
+    ckpt_path = out / "checkpoint.jsonl"
+    legacy_path = out / "checkpoint.json"
     done = set()
     if checkpoint and ckpt_path.exists():
         try:
-            done = set(json.loads(ckpt_path.read_text()).get("prs_done", []))
+            for line in ckpt_path.read_text().splitlines():
+                try:
+                    done.add(int(line))
+                except ValueError:
+                    continue
+        except Exception:
+            done = set()
+    elif checkpoint and legacy_path.exists():
+        try:
+            done = set(json.loads(legacy_path.read_text()).get("prs_done", []))
         except Exception:
             done = set()
 
@@ -209,7 +224,8 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
         index["prs"].append(pid)
         if checkpoint:
             done.add(pid)
-            ckpt_path.write_text(json.dumps({"prs_done": sorted(done)}))
+            with open(ckpt_path, "a", encoding="ascii") as f:
+                f.write(f"{pid}\n")
         if total and (i % 25 == 0 or i == total):
             api._log(f"PR {i}/{total} done")
 
