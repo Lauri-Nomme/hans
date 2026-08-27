@@ -176,12 +176,20 @@ def refs_of(gitdir):
 
 
 def _norm_refs(mapping):
-    """Drop non-content refs: remote-tracking, BB PR refs, peeled tag refs."""
+    """Drop non-content refs: remote-tracking, BB PR refs, peeled tag refs,
+    and the scraper's mirror-internal retention refs (refs/stash-refs/* keep
+    hidden PR source-tips reachable for repack; refs/keep/* retain objects
+    behind unwritable refnames). None of these are content refs and GH will
+    never carry them."""
     out = {}
     for ref, sha in mapping.items():
         if ref.startswith("refs/remotes/"):
             continue
         if ref.startswith("refs/pull-requests/"):
+            continue
+        if ref.startswith("refs/stash-refs/"):
+            continue
+        if ref.startswith("refs/keep/"):
             continue
         if ref.endswith("^{}"):
             continue
