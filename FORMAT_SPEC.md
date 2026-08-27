@@ -400,7 +400,10 @@ when the activity carried a `commit` object in REST.
 Three nested tars:
 
 **`metadata.atl.tar.atl.gz`** = bare-repo skeleton (tar, then gzip). Contains:
-- `HEAD` = `ref: refs/heads/main` (21 bytes incl. newline)
+- `HEAD` = `ref: refs/heads/<default branch>` (21 bytes for the golden's
+  `main`); the default branch is taken from the branches REST dump's
+  `isDefault` flag, falling back to `main` when the dump is empty or
+  predates the flag
 - `config` = git config:
   ```
   [include]

@@ -449,8 +449,24 @@ class Emitter:
             return
         entries[name] = sha.encode() + b"\n"
 
+    def _default_branch(self):
+        """Default branch displayId for HEAD, from the branches dump's
+        isDefault flag (REST-derivable; the golden repo marks main). Falls
+        back to main when the dump has no branches (empty repo — Bitbucket's
+        standard default, not REST-derivable) or predates the flag."""
+        branches = self.m.branches() or []
+        default = [b for b in branches if b.get("isDefault")]
+        if default:
+            b = default[0]
+            return b.get("displayId") or b["id"].replace("refs/heads/", "")
+        if branches:
+            self.m.warnings.append(
+                "branches dump carries no isDefault flag — HEAD falls back "
+                "to refs/heads/main")
+        return "main"
+
     def git_metadata(self):
-        entries = {"HEAD": b"ref: refs/heads/main\n",
+        entries = {"HEAD": f"ref: refs/heads/{self._default_branch()}\n".encode(),
                    "config": CONFIG_BYTES,
                    "app-info/gc.pid": b"499@bd157217c6d7"}
         for b in self.m.branches() or []:
