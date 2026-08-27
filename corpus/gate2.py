@@ -162,61 +162,71 @@ def check_refs(A, B):
     return fails
 
 
-def _git_objects(gitdir):
-    """sha -> (type, raw bytes) for every object in a bare repo.
+def _object_set(gitdir):
+    """{sha: type} for every object in a bare repo, one pass, no bodies.
 
-    Single `git cat-file --batch` process for all objects (one subprocess per
-    object would be ~seconds per 10k PRs * 1000s of objects = too slow).
-    """
-    git = lambda *a: subprocess.run(["git", "-C", gitdir, *a],
-                                    capture_output=True, check=True)
-    out = git("cat-file", "--batch-all-objects",
-              "--batch-check=%(objectname) %(objecttype)").stdout.decode()
+    Git object SHAs are content hashes, so the set alone decides migration
+    fidelity — equal sets imply equal contents."""
+    out = subprocess.run(["git", "-C", gitdir, "cat-file", "--batch-all-objects",
+                          "--batch-check=%(objectname) %(objecttype)"],
+                         capture_output=True, check=True).stdout.decode()
     objs = {}
-    shas, types = [], {}
     for line in out.splitlines():
         sha, typ = line.split()
-        shas.append(sha)
-        types[sha] = typ
-    p = subprocess.Popen(["git", "-C", gitdir, "cat-file", "--batch"],
-                         stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    assert p.stdin is not None and p.stdout is not None
-    for sha in shas:
-        p.stdin.write(sha.encode() + b"\n")
-        p.stdin.flush()
-        hdr = p.stdout.readline().decode().split()
-        _sha, size = hdr[0], int(hdr[2])
-        raw = p.stdout.read(size)
-        p.stdout.read(1)
-        objs[_sha] = (types[sha], raw)
-    p.stdin.close()
-    p.wait()
+        objs[sha] = typ
     return objs
 
 
+def _fsck(gitdir):
+    """Re-hash every object in a mirror (streaming) and return problem lines.
+
+    git verifies object hashes only at ingest (fetch -> index-pack /
+    unpack-objects); plain reads do not re-hash, so post-ingest corruption
+    (bit rot, a bad repack write) is servable by cat-file without complaint
+    and invisible to sha-set comparison. `git fsck` catches exactly that
+    class with O(1) memory."""
+    r = subprocess.run(["git", "-C", gitdir, "fsck", "--no-dangling",
+                        "--no-progress"],
+                       capture_output=True, text=True)
+    errs = [ln for ln in (r.stderr or "").splitlines()
+            if ln.startswith(("error:", "fatal:"))]
+    if r.returncode != 0 and not errs:
+        errs.append(f"git fsck exited {r.returncode}: {(r.stderr or '')[:200]}")
+    return errs
+
+
 def check_git_objects(A, B):
-    """Object-wise git repo comparison via the scraped mirrors
-    (`git cat-file`, per the plan — not byte-level tar compare)."""
-    import subprocess
+    """Object-wise git repo comparison via the scraped mirrors.
+
+    Migration fidelity: sha + type sets (`--batch-check`, no bodies held in
+    RAM). Mirror integrity: `git fsck` per side, which re-hashes every
+    object — the one class of difference (on-disk corruption) that equal
+    SHAs cannot rule out."""
     ga, gb = f"{A}/git", f"{B}/git"
     for g in (ga, gb):
         if not (subprocess.run(["git", "-C", g, "rev-parse", "--is-bare-repository"],
                                capture_output=True).returncode == 0):
             print(f"git mirror missing at {g}")
             return 1
-    ma, mb = _git_objects(ga), _git_objects(gb)
+    fails = 0
+    for g in (ga, gb):
+        errs = _fsck(g)
+        if errs:
+            fails += 1
+            print(f"git fsck {g}: {len(errs)} problem(s)")
+            for e in errs[:5]:
+                print("   ", e)
+        else:
+            print(f"git fsck {g}: clean")
+    ma, mb = _object_set(ga), _object_set(gb)
     ka, kb = set(ma), set(mb)
     if ka != kb:
         print(f"git objects: set differ (A={len(ka)} B={len(kb)})")
         print("   A-only:", sorted(ka - kb)[:5])
         print("   B-only:", sorted(kb - ka)[:5])
-        return 1
-    diffs = [sha for sha in ka if ma[sha] != mb[sha]]
-    if diffs:
-        print(f"git objects: {len(diffs)} content diffs: {sorted(diffs)[:5]}")
-        return 1
-    print(f"git objects: {len(ka)} objects identical (set + content)")
-    return 0
+        return fails + 1
+    print(f"git objects: {len(ka)} objects identical (sha + type set)")
+    return fails
 
 
 def check_tasks(A, B, pids):
