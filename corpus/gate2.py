@@ -139,9 +139,11 @@ def check_activities(A, B, pids):
 def check_refs(A, B):
     """Branches + tags (id, latestCommit, hash for annotated tags) from the scrapes."""
     fails = 0
+    proj_a, repo_a = _proj_repo(A)
+    proj_b, repo_b = _proj_repo(B)
     for kind in ("branches", "tags"):
-        ra = load(A, f"{kind}_{'FIX'}_golden")
-        rb = load(B, f"{kind}_{'FIX'}_golden")
+        ra = load(A, f"{kind}_{proj_a}_{repo_a}")
+        rb = load(B, f"{kind}_{proj_b}_{repo_b}")
         if ra is None or rb is None:
             print(f"{kind}: missing on one side"); fails += 1; continue
         def sig(items):
