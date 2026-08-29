@@ -37,7 +37,7 @@ Output layout (consumed by `assemble`):
                              PR list, per-PR detail+activities)
     <out>/users.json         harvested distinct users
     <out>/index.json         scrape metadata (base, project, repo, ids, prs)
-    <out>/checkpoint.json    resumable progress (PR ids completed)
+    <out>/checkpoint.jsonl   resumable progress (completed PR ids, one per line)
     <out>/git/               bare mirror clone incl. PR refs
 """
 import json
@@ -93,6 +93,7 @@ class Api:
 
     def get(self, path, params=None, retries=4):
         url = path if path.startswith("http") else f"{self.base}{path}"
+        last = None
         for attempt in range(retries + 1):
             self._throttle()
             try:
@@ -104,18 +105,30 @@ class Api:
                     wait = max((self.reset or 0) - time.time() + 2, 30)
                     self._log(f"403 rate-limited — sleeping {int(wait)}s")
                     time.sleep(wait)
+                    last = "403 rate-limited"
                     continue
                 if r.status_code in (429, 500, 502, 503, 504):
                     wait = min(2 ** attempt * 2, 60)
                     self._log(f"HTTP {r.status_code} — retry in {wait}s")
                     time.sleep(wait)
+                    last = f"HTTP {r.status_code}"
                     continue
                 r.raise_for_status()
-            except (requests.RequestException, ConnectionError, TimeoutError):
+            except (requests.RequestException, ConnectionError, TimeoutError) as e:
+                # Every failure class is retried (transient 4xx happens, and a
+                # retry is free robustness), but the actual error is surfaced
+                # in the log so a permanently-bad request (404/401/400) is
+                # diagnosable from the output instead of masked by a generic
+                # "gave up" message.
+                last = f"{type(e).__name__}: {e}"
+                kind = "HTTP error" if isinstance(e, requests.HTTPError) \
+                    else "network error"
                 wait = min(2 ** attempt * 2, 60)
-                self._log(f"network error — retry in {wait}s")
+                self._log(f"warning: {kind}, retrying — {last} (retry in {wait}s)")
                 time.sleep(wait)
-        raise RuntimeError(f"gave up after {retries} retries: {path}")
+        raise RuntimeError(
+            f"gave up after {retries} retries: {path}"
+            + (f" — last error: {last}" if last else ""))
 
     def paginate(self, path, params=None, per_page=1000):
         """Page through a collection. Bitbucket caps `limit` at 1000, so request
@@ -175,11 +188,26 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
          f"{rest_path}/pull-requests?state=ALL&withAttributes=true")
 
     # --- checkpoint / resume ------------------------------------------------
-    ckpt_path = out / "checkpoint.json"
+    # Append-only JSONL: one completed PR id per line, appended O(1) per PR.
+    # (The old format rewrote + re-sorted the full id set per PR — O(n^2),
+    # ~400 MB of redundant writes at 10k PRs.) A torn trailing line from a
+    # crash mid-append is tolerated on load; the legacy checkpoint.json is
+    # still honored for resume and left in place.
+    ckpt_path = out / "checkpoint.jsonl"
+    legacy_path = out / "checkpoint.json"
     done = set()
     if checkpoint and ckpt_path.exists():
         try:
-            done = set(json.loads(ckpt_path.read_text()).get("prs_done", []))
+            for line in ckpt_path.read_text().splitlines():
+                try:
+                    done.add(int(line))
+                except ValueError:
+                    continue
+        except Exception:
+            done = set()
+    elif checkpoint and legacy_path.exists():
+        try:
+            done = set(json.loads(legacy_path.read_text()).get("prs_done", []))
         except Exception:
             done = set()
 
@@ -196,7 +224,8 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
         index["prs"].append(pid)
         if checkpoint:
             done.add(pid)
-            ckpt_path.write_text(json.dumps({"prs_done": sorted(done)}))
+            with open(ckpt_path, "a", encoding="ascii") as f:
+                f.write(f"{pid}\n")
         if total and (i % 25 == 0 or i == total):
             api._log(f"PR {i}/{total} done")
 

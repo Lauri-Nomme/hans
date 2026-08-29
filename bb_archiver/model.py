@@ -20,6 +20,7 @@ class Model:
         self.users = {}
         self.warnings = []
         self._cache = {}
+        self._warned_slugs = set()
 
     # -- load raw dumps -----------------------------------------------------
     def _load(self, name):
@@ -75,7 +76,14 @@ class Model:
 
     # --- user harvesting -----------------------------------------------------
     def harvest_users(self):
-        """Collect distinct users from every author/commenter/reviewer field."""
+        """Collect distinct users from every author/commenter/reviewer field.
+
+        Walks everything the emitter can ever pass to ref_id_for: PR author,
+        reviewers, participants, per-activity user, addedReviewers/
+        removedReviewers (users only reachable there when the reviewer state
+        was undone before the scrape), and the full comment subtree (top-level
+        authors, nested reply authors, task resolvers). Anything missed here
+        would otherwise be silently misattributed by ref_id_for."""
         users = {}
         seen = set()
 
@@ -93,25 +101,44 @@ class Model:
                 "type": user.get("type", "NORMAL"),
             }
 
+        def walk_comment(comment):
+            add(comment.get("author"))
+            add(comment.get("resolver"))
+            for reply in comment.get("comments") or []:
+                walk_comment(reply)
+
         for pr in (self.prs() or []):
             add(pr.get("author", {}).get("user"))
             for u in (pr.get("reviewers") or []) + (pr.get("participants") or []):
                 add(u.get("user"))
             for act in (self.activities(pr["id"]) or []):
                 add(act.get("user"))
+                for u in (act.get("addedReviewers") or []) \
+                        + (act.get("removedReviewers") or []):
+                    add(u)
                 c = act.get("comment")
                 if isinstance(c, dict):
-                    add(c.get("author"))
+                    walk_comment(c)
         return OrderedDict(sorted(users.items(), key=lambda kv: kv[0]))
 
     # --- synthetic IDs (stable across runs, from natural keys) ---------------
     def ref_id_for(self, user_slug):
-        """Derive 'slug|displayName||type' archive userId for a user slug."""
-        u = self.users[self._slug_key(user_slug)]
-        return f"{u['slug']}|{u['displayName']}||{u.get('type', 'NORMAL')}"
+        """Derive 'slug|displayName||type' archive userId for a user slug.
 
-    def _slug_key(self, slug):
-        return slug if slug in self.users else next(iter(self.users.keys()))
+        A slug that harvest_users did not find is never substituted with
+        another user: it is synthesized as 'slug|slug||NORMAL' (matching how
+        the Bitbucket import renders stub users) and recorded as a warning so
+        it surfaces in the assemble report."""
+        u = self.users.get(user_slug)
+        if u is not None:
+            return f"{u['slug']}|{u['displayName']}||{u.get('type', 'NORMAL')}"
+        if user_slug not in self._warned_slugs:
+            self._warned_slugs.add(user_slug)
+            self.warnings.append(
+                f"unknown user slug {user_slug!r}: not present in any "
+                f"harvestable field — synthesized archive id "
+                f"'{user_slug}|{user_slug}||NORMAL'")
+        return f"{user_slug}|{user_slug}||NORMAL"
 
 
 def load_model(scrape_dir):

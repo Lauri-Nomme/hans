@@ -221,6 +221,23 @@ fn main() {
             }
         }
     }
+    if packs.len() > 1 {
+        // read_dir order is unspecified, so picking packs[0] could silently
+        // emit a partial object set. The emitter's `git repack -adf` leaves
+        // exactly one idx; anything else (a .keep'ed older pack, crash
+        // debris) is ambiguous and must fail loudly instead.
+        eprintln!(
+            "refusing to guess: {} pack idx files in {} — the object set would \
+             depend on read_dir order. Remove the stale pack/idx or run \
+             `git repack -adf` in the mirror first.",
+            packs.len(),
+            packdir.display()
+        );
+        for p in &packs {
+            eprintln!("  {}", p.display());
+        }
+        std::process::exit(1);
+    }
     if packs.is_empty() {
         eprintln!("no pack idx in {}", packdir.display());
         std::process::exit(1);

@@ -264,6 +264,11 @@ theorized:
 - **`rescopedTimestamp` internal target-advance**: target-only advances bump it
   without emitting a RESCOPED activity (verified); the tool approximates it from
   the last REST RESCOPED activity. Benign divergence.
+- **Project permission levels are not REST-derivable** (the `/permissions`
+  endpoints require admin). The archive grants every harvested user the
+  least-privilege `PROJECT_READ` (normal user); a real export carries the true
+  levels. The import target's sysadmin keeps global admin, and GEI ignores
+  Bitbucket permissions.
 - **Users import as stub accounts** (displayName=slug, no email) — expected
   Bitbucket import behavior. The only email fidelity in the whole archive is in
   git author/committer objects, which is what GitHub attribution / mannequin

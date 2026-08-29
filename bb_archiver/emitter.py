@@ -94,9 +94,14 @@ class Emitter:
         return _gzbuf(b'{"projectAdmin":false,"projectRead":false,"projectWrite":false}')
 
     def project_permissions(self):
+        """Permission levels are not REST-derivable without admin (the
+        /permissions endpoints reject normal users), so every harvested user
+        is granted the least-privilege level, PROJECT_READ (normal user) —
+        never PROJECT_ADMIN. A real export carries the true levels; the
+        import target's sysadmin retains global admin regardless."""
         perm = {
             "groups": [],
-            "permission": "PROJECT_ADMIN",
+            "permission": "PROJECT_READ",
             "userIds": [self.m.ref_id_for(slug) for slug in sorted(self.m.users)],
         }
         return _gzbuf(jw.compact([perm]).encode())
@@ -449,8 +454,24 @@ class Emitter:
             return
         entries[name] = sha.encode() + b"\n"
 
+    def _default_branch(self):
+        """Default branch displayId for HEAD, from the branches dump's
+        isDefault flag (REST-derivable; the golden repo marks main). Falls
+        back to main when the dump has no branches (empty repo — Bitbucket's
+        standard default, not REST-derivable) or predates the flag."""
+        branches = self.m.branches() or []
+        default = [b for b in branches if b.get("isDefault")]
+        if default:
+            b = default[0]
+            return b.get("displayId") or b["id"].replace("refs/heads/", "")
+        if branches:
+            self.m.warnings.append(
+                "branches dump carries no isDefault flag — HEAD falls back "
+                "to refs/heads/main")
+        return "main"
+
     def git_metadata(self):
-        entries = {"HEAD": b"ref: refs/heads/main\n",
+        entries = {"HEAD": f"ref: refs/heads/{self._default_branch()}\n".encode(),
                    "config": CONFIG_BYTES,
                    "app-info/gc.pid": b"499@bd157217c6d7"}
         for b in self.m.branches() or []:

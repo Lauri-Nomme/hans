@@ -113,14 +113,18 @@ def _check_ref_object_integrity(archive, problems):
             f = archive.extractfile(name)
             repos[rid]["meta"] = gzip.decompress(f.read()) if f else b""
         elif name.endswith("contents/objects.atl.tar") or name.endswith("objects.atl.tar"):
-            f = archive.extractfile(name)
-            repos[rid]["objs"] = f.read() if f else b""
+            # Keep the seekable ExFileObject (not a buffered read): the inner
+            # tar is walked by headers only — tarfile seeks past member
+            # bodies — so validation costs O(names) RAM, never the size of
+            # the repo's object content.
+            repos[rid]["objs"] = archive.extractfile(name)
     for rid, r in repos.items():
         if r["meta"] is None or r["objs"] is None:
             problems.append(f"repo {rid}: missing metadata.atl.tar or "
                             f"objects.atl.tar in archive")
             continue
-        objs = {n.replace("/", "") for n in _inner_map(r["objs"])}
+        with tarfile.open(fileobj=r["objs"], mode="r") as objs_tar:
+            objs = {m.name.replace("/", "") for m in objs_tar.getmembers()}
         for refname, content in _inner_map(r["meta"]).items():
             if not (refname.startswith("refs/") or
                     refname.startswith("stash-refs/")):
