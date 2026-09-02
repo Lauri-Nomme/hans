@@ -216,6 +216,7 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
         todo = todo[:limit_prs]
     todo = [pid for pid in todo if pid not in done]
     total = len(todo)
+    t0 = time.time()
     for i, pid in enumerate(todo, 1):
         pre = f"{rest_path}/pull-requests/{pid}"
         save(f"pr_{pid}", api.get(pre, {"withAttributes": True}), pre)
@@ -227,7 +228,12 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
             with open(ckpt_path, "a", encoding="ascii") as f:
                 f.write(f"{pid}\n")
         if total and (i % 25 == 0 or i == total):
-            api._log(f"PR {i}/{total} done")
+            el = time.time() - t0
+            rate = i / max(el, 0.001)
+            eta = (total - i) / max(rate, 1)
+            pct = i / total * 100
+            api._log(f"PR {i}/{total} done "
+                     f"({pct:4.1f}%, {rate:,.1f}/s, ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
 
     # --- git mirror ----------------------------------------------------------
     if git_dir is not None:

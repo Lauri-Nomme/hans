@@ -401,8 +401,10 @@ class Emitter:
                     if done % 500 == 0 or done == total:
                         el = time.time() - t0
                         rate = done / max(el, 0.001)
+                        eta = int((total - done) / rate)
+                        pct = done / total * 100
                         _log(f"git objects: merge-base {done}/{total} "
-                             f"({rate:,.0f}/s, ETA {int((total - done) / rate)}s)")
+                             f"({pct:4.1f}%, {rate:,.0f}/s, ETA {eta//3600}:{eta%3600//60:02d}:{eta%60:02d})")
         return {pair_for[p]: results[p] for p in pairs}
 
     # ---------------- git skeleton ---------------------------------------
@@ -569,7 +571,7 @@ class Emitter:
                         rate = n / max(time.time() - t0, 1)
                         eta = (total - n) / max(rate, 1)
                         _log(f"git objects: unpacked {n}/{total} "
-                             f"({pct:4.1f}%, {rate:,.0f}/s, ETA {int(eta)}s)")
+                             f"({pct:4.1f}%, {rate:,.0f}/s, ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
                         last = n
             proc = subprocess.Popen(["git", "unpack-objects", "-q", "-r"],
                                     cwd=tmp, stdin=subprocess.PIPE,
@@ -665,6 +667,7 @@ class Emitter:
                 _log(f"archive: writing {total} pull requests")
                 _log("archive: precomputing merge-bases")
                 bases = self._merge_bases(prs)
+                t0 = time.time()
                 for i, pr in enumerate(prs, 1):
                     pid = pr["id"]
                     add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/metadata.json.atl.gz",
@@ -674,7 +677,12 @@ class Emitter:
                     add(f"{GITPR}/repositories/{self.rid}/pullrequests/{pid}/caches.atl.tar.atl.gz",
                         self.pr_cache(pr, bases.get(pid)))
                     if i % 25 == 0 or i == total:
-                        _log(f"PR {i}/{total} done")
+                        el = time.time() - t0
+                        rate = i / max(el, 0.001)
+                        eta = (total - i) / max(rate, 1)
+                        pct = i / total * 100
+                        _log(f"PR {i}/{total} done "
+                             f"({pct:4.1f}%, {rate:,.1f}/s, ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
                 add(f"_/repository/hierarchy_end/{self.hid}", b"")
             self._write_warnings(out_path)
             _log(f"assembled {out_path}")
