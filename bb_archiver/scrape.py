@@ -146,8 +146,77 @@ class Api:
         return values
 
 
+def _progress(api, i, total, t0):
+    el = time.time() - t0
+    rate = i / max(el, 0.001)
+    eta = (total - i) / max(rate, 1)
+    pct = i / total * 100
+    api._log(f"PR {i}/{total} done "
+             f"({pct:4.1f}%, {rate:,.1f}/s, ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
+
+
+def _scrape_prs_sequential(api, rest_path, todo, total, out, ckpt_path,
+                           index, checkpoint, done, save):
+    t0 = time.time()
+    for i, pid in enumerate(todo, 1):
+        pre = f"{rest_path}/pull-requests/{pid}"
+        save(f"pr_{pid}", api.get(pre, {"withAttributes": True}), pre)
+        save_paged_list = api.paginate(f"{pre}/activities")
+        save(f"pr_{pid}_activities", save_paged_list, f"{pre}/activities")
+        index["prs"].append(pid)
+        if checkpoint:
+            done.add(pid)
+            with open(ckpt_path, "a", encoding="ascii") as f:
+                f.write(f"{pid}\n")
+        if total and (i % 25 == 0 or i == total):
+            _progress(api, i, total, t0)
+
+
+def _scrape_prs_parallel(base, auth, rest_path, todo, total, out, ckpt_path,
+                         index, checkpoint, done, log_api, workers):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    lock = threading.Lock()
+    counter = [0]
+    t0 = time.time()
+
+    def _save(name, payload, endpoint):
+        fp = out / "rest" / f"{name}.json"
+        fp.write_text(json.dumps(payload), encoding="utf-8")
+        with lock:
+            index.setdefault("entities", []).append(
+                {"file": f"rest/{name}.json", "endpoint": endpoint})
+
+    def fetch_one(pid):
+        worker_api = Api(base, auth)
+        pre = f"{rest_path}/pull-requests/{pid}"
+        detail = worker_api.get(pre, {"withAttributes": True})
+        activities = worker_api.paginate(f"{pre}/activities")
+        _save(f"pr_{pid}", detail, pre)
+        _save(f"pr_{pid}_activities", activities, f"{pre}/activities")
+        with lock:
+            index["prs"].append(pid)
+            if checkpoint:
+                done.add(pid)
+                with open(ckpt_path, "a", encoding="ascii") as f:
+                    f.write(f"{pid}\n")
+            counter[0] += 1
+            i = counter[0]
+            if total and (i % 25 == 0 or i == total):
+                _progress(log_api, i, total, t0)
+
+    _log(f"scraping {total} PRs with {workers} workers")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(fetch_one, pid): pid for pid in todo}
+        for fut in as_completed(futs):
+            exc = fut.exception()
+            if exc:
+                raise exc
+
+
 def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
-          checkpoint=True, http=None):
+          checkpoint=True, http=None, pr_workers=1):
     out = Path(out)
     (out / "rest").mkdir(parents=True, exist_ok=True)
     api = Api(base, (user, password))
@@ -216,24 +285,14 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
         todo = todo[:limit_prs]
     todo = [pid for pid in todo if pid not in done]
     total = len(todo)
-    t0 = time.time()
-    for i, pid in enumerate(todo, 1):
-        pre = f"{rest_path}/pull-requests/{pid}"
-        save(f"pr_{pid}", api.get(pre, {"withAttributes": True}), pre)
-        save_paged_list = api.paginate(f"{pre}/activities")
-        save(f"pr_{pid}_activities", save_paged_list, f"{pre}/activities")
-        index["prs"].append(pid)
-        if checkpoint:
-            done.add(pid)
-            with open(ckpt_path, "a", encoding="ascii") as f:
-                f.write(f"{pid}\n")
-        if total and (i % 25 == 0 or i == total):
-            el = time.time() - t0
-            rate = i / max(el, 0.001)
-            eta = (total - i) / max(rate, 1)
-            pct = i / total * 100
-            api._log(f"PR {i}/{total} done "
-                     f"({pct:4.1f}%, {rate:,.1f}/s, ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
+
+    if pr_workers > 1 and total > 1:
+        _scrape_prs_parallel(base, (user, password), rest_path, todo, total,
+                             out, ckpt_path, index, checkpoint, done, api,
+                             pr_workers)
+    else:
+        _scrape_prs_sequential(api, rest_path, todo, total, out, ckpt_path,
+                               index, checkpoint, done, save)
 
     # --- git mirror ----------------------------------------------------------
     if git_dir is not None:
@@ -530,10 +589,13 @@ def main():
     ap.add_argument("--no-git", action="store_true")
     ap.add_argument("--limit-prs", type=int, default=0)
     ap.add_argument("--no-resume", action="store_true")
+    ap.add_argument("--pr-workers", type=int, default=4,
+                    help="parallel workers for PR detail+activities fetch (default 4)")
     args = ap.parse_args()
     index = crawl(args.base, args.user, args.password, args.project, args.repo, args.out,
                   git_dir=None if args.no_git else os.path.join(args.out, "git"),
-                  limit_prs=args.limit_prs, checkpoint=not args.no_resume)
+                  limit_prs=args.limit_prs, checkpoint=not args.no_resume,
+                  pr_workers=args.pr_workers)
     _log(f"scraped {index['project']}/{index['repo']} -> {args.out}")
 
 
