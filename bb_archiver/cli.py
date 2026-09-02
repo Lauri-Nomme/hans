@@ -20,7 +20,8 @@ def cmd_scrape(args):
     index = crawl(args.base, args.user, args.password, args.project, args.repo,
                   args.out,
                   git_dir=None if args.no_git else str(Path(args.out) / "git"),
-                  limit_prs=args.limit_prs, checkpoint=not args.no_resume)
+                  limit_prs=args.limit_prs, checkpoint=not args.no_resume,
+                  pr_workers=args.pr_workers)
     _log(f"scraped {args.project}/{args.repo} -> {args.out} "
          f"(project_id={index['project_id']} repo_id={index['repo_id']})")
 
@@ -176,6 +177,8 @@ def main(argv=None):
     s.add_argument("--limit-prs", type=int, default=0, help="cap PRs scraped (test)")
     s.add_argument("--no-resume", action="store_true",
                    help="ignore the checkpoint and scrape all PRs")
+    s.add_argument("--pr-workers", type=int, default=4,
+                   help="parallel workers for PR detail+activities fetch (default 4)")
     s.set_defaults(fn=cmd_scrape)
 
     a = sub.add_parser("assemble")
