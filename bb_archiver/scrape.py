@@ -537,12 +537,19 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
         _log(f"git mirror: {len(missing)} ref(s) reference objects the main "
              f"fetch did not carry; SHA-fetching {len(shas)} unique object(s) "
              f"(Bitbucket hides refs/stash-refs/*)")
+        t0 = time.time()
         for i in range(0, len(shas), fetch_batch):
             batch = shas[i:i + fetch_batch]
-            _log(f"git mirror: sha-fetch {i + 1}-{min(i + fetch_batch, len(shas))}"
-                 f"/{len(shas)}")
             subprocess.run([git, *auth, "fetch", "origin", *batch], check=True,
                            cwd=git_dir, capture_output=True)
+            done = min(i + fetch_batch, len(shas))
+            el = time.time() - t0
+            rate = done / max(el, 0.001)
+            eta = (len(shas) - done) / max(rate, 1)
+            pct = done / len(shas) * 100
+            _log(f"git mirror: sha-fetch {done}/{len(shas)} "
+                 f"({pct:4.1f}%, {rate:,.1f}/s, "
+                 f"ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
 
     # ...then ALWAYS make the refs correct, keyed on REF state not object
     # presence. A resumed run can have the objects present (a prior run fetched
