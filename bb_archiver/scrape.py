@@ -188,8 +188,17 @@ def _scrape_prs_parallel(base, auth, rest_path, todo, total, out, ckpt_path,
             index.setdefault("entities", []).append(
                 {"file": f"rest/{name}.json", "endpoint": endpoint})
 
+    local = threading.local()
+
+    def _get_api():
+        api = getattr(local, "api", None)
+        if api is None:
+            local.api = Api(base, auth)
+            api = local.api
+        return api
+
     def fetch_one(pid):
-        worker_api = Api(base, auth)
+        worker_api = _get_api()
         pre = f"{rest_path}/pull-requests/{pid}"
         detail = worker_api.get(pre, {"withAttributes": True})
         activities = worker_api.paginate(f"{pre}/activities")
