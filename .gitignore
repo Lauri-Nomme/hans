@@ -2,6 +2,8 @@
 lab/home/
 # bb-archiver scrape output (REST dumps + git mirror) — build artifact.
 scrape/
+# gate3 resumable checkpoint (regenerated each run).
+gate3-state.json
 *.log
 # Bitbucket licenses are credentials; never commit them.
 lab/license*.txt
