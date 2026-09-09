@@ -93,7 +93,15 @@ walk_wizard() {
     esac
     local -a curl_args=()
     local kv
-    for kv in "${form[@]}"; do curl_args+=(-d "$kv"); done
+    for kv in "${form[@]}"; do
+      # license keys contain '+' (base64), which curl -d turns into spaces and
+      # the wizard then rejects -> URL-encode that field (verified on 9.4.18).
+      if [[ "$kv" == license=* ]]; then
+        curl_args+=(--data-urlencode "$kv")
+      else
+        curl_args+=(-d "$kv")
+      fi
+    done
     curl -s -L -b "$jar" -c "$jar" -X POST "$base/setup" "${curl_args[@]}" >/dev/null
     sleep 2
   done
