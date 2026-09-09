@@ -89,12 +89,15 @@ bb-archiver validate  -> schema self-check of the tar
 
 - **Gate 1 — golden master**: `corpus/gate1.py` assembles the archive from REST
   + mirror and semantic-diffs it against the real admin export. **PASS**, no
-  genuine differences.
+  genuine differences (refs compared as a refname→sha map: the exporter snapshots
+  the live repo's loose-vs-packed ref storage; reflogs by sha-sequence, ±1s epoch
+  tolerated; `app-info/*` ignored).
 - **Gate 2 — round-trip import**: `corpus/gate2.py` imports the synthetic
   archive into lab instance `bb-lab-b`, rescrapes both, and diffs PRs,
-  activities, branches, tags, and git objects object-wise. **PASS** — all 7 PRs
-  incl. the stacked-pair PR4 phantom-merge (commit-less MERGED survives import),
-  65 git objects identical.
+  activities, branches, tags, and git objects object-wise. **PASS** — all 8 PRs
+  incl. the stacked-pair PR4 phantom-merge (commit-less MERGED survives import)
+  and the PR 8 reference-form corpus (description + comment intact), 68 git
+  objects identical.
 - **Gate 2B — official re-export**: `corpus/gate2b.py` re-exports `bb-lab-b`
   with the *official* admin endpoint and compares against the golden export,
   surfacing everything the official path preserves that REST cannot see.
