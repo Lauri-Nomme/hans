@@ -43,6 +43,55 @@ def _inner_map(data):
     return out
 
 
+def _norm_meta_map(inner):
+    """Normalize a metadata.atl.tar inner map for comparison.
+
+    The live repo's ref storage (loose refs vs packed-refs) is a runtime GC
+    artifact, not REST-derivable — the official exporter snapshots whichever
+    state the repo is in, so refs are compared as a refname -> sha map rather
+    than by byte layout. app-info/* is runtime noise (FORMAT_SPEC: "reproduce
+    or omit; observe in Gate 1"). Everything else (HEAD, config, logs/*) is
+    byte-compared.
+    """
+    refs = {}
+    other = {}
+    for name, data in inner.items():
+        if name.startswith("app-info/"):
+            continue
+        if name == "packed-refs":
+            for line in data.decode("utf-8", "replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(" ", 1)
+                if len(parts) != 2:
+                    continue
+                sha, ref = parts
+                if ref.endswith("^{}"):  # peeled tag target, derived
+                    continue
+                refs[ref] = sha.strip()
+            continue
+        if name.startswith(("refs/", "stash-refs/")):
+            if data.endswith(b"\n"):
+                data = data[:-1]
+            refs[name] = data.decode("utf-8", "replace")
+            continue
+        if name.startswith("logs/"):
+            # reflogs: the epoch is a runtime artifact (±1s vs the RESCOPED
+            # activity timestamp the emitter derives from) — compare the
+            # ref-update sequence (old->new shas), not the wall-clock field.
+            lines = []
+            for line in data.decode("utf-8", "replace").splitlines():
+                tok = line.split()
+                if len(tok) >= 7 and tok[5].isdigit():
+                    tok = tok[:5] + tok[6:]
+                lines.append(" ".join(tok))
+            other[name] = ("\n".join(lines)).encode("utf-8", "replace")
+            continue
+        other[name] = data
+    return {"refs": refs, "other": other}
+
+
 class Report:
     def __init__(self):
         self.notes = []
@@ -86,6 +135,22 @@ def compare(real_archive, syn_archive, report):
             # derivable per FORMAT_SPEC, so compare entry-wise; a diff here
             # is genuine (e.g. a wrong ref or wrong merge-base), not noise.
             ma, mb = _inner_map(a), _inner_map(b)
+            if "metadata/metadata.atl.tar" in name:
+                na, nb = _norm_meta_map(ma), _norm_meta_map(mb)
+                if na == nb:
+                    report.note(f"{name}: same after refs/app-info normalization "
+                                f"(packed-vs-loose refs)")
+                    continue
+                for k in sorted(set(na["refs"]) | set(nb["refs"])):
+                    if na["refs"].get(k) != nb["refs"].get(k):
+                        report.fail(f"{name} ref {k}: real={na['refs'].get(k)!r} "
+                                    f"syn={nb['refs'].get(k)!r}")
+                for k in sorted(set(na["other"]) | set(nb["other"])):
+                    if na["other"].get(k) != nb["other"].get(k):
+                        report.fail(f"{name} member {k!r}: "
+                                    f"real={len(na['other'].get(k,b''))}b "
+                                    f"syn={len(nb['other'].get(k,b''))}b")
+                continue
             if ma == mb:
                 report.note(f"{name}: same entries after inner-tar compare "
                             f"(byte layout differs)")
