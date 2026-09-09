@@ -321,4 +321,68 @@ else
   log "commit-level comment skipped (sha lookup)"
 fi
 
-log "PR layer complete. PR ids: PR1=$PR1_ID PR2=$PR2_ID PR3=$PR3_ID PR4=$PR4_ID PR5=$PR5_ID PR6=$PR6_ID PR7=$PR7_ID"
+# ----------------- PR 8: reference-form corpus (OPEN, created LAST) ----------
+# An OPEN PR whose description AND top-level comment carry a matrix of PR-number
+# and commit references (all rewritten to real, resolvable lab targets) so we can
+# verify byte-fidelity of each reference form through REST scrape -> export
+# archive -> GH import. Created LAST so the earlier PR ids (1-7) keep their
+# numbers. Open (never merged) so its body is migrated as-is.
+PR8_BRANCH=feature/references
+PR8_ID="$(pr_by_branch "$PR8_BRANCH")"
+if [[ -z "$PR8_ID" ]]; then
+  log "creating PR8 ($PR8_BRANCH -> main, stays OPEN; reference-form corpus)"
+  git checkout -q -B "$PR8_BRANCH" main
+  cat > references.md <<'EOF'
+# Reference forms
+
+Fixture content for reference-fidelity testing: the PR-number/commit reference
+matrix lives in this PR's description and top-level comment.
+EOF
+  git add references.md
+  mkcommit "Alan Turing" "alan@example.com" "Alan Turing" "alan@example.com" \
+    "2024-05-01T09:00:00+00:00" "test: add reference-forms fixture file"
+  push_branches "alan:alan-pw-123" "+refs/heads/$PR8_BRANCH"
+  log "PR8: pushed branch $PR8_BRANCH"
+
+  # real, resolvable reference targets (all exist in this repo's git history)
+  C2="$(git rev-parse main~2)"               # 'feat: add core utility library' on main
+  C1="$(git rev-parse v1.0)"                 # lightweight tag v1.0 -> C1 on main
+  MAIN_TIP="$(git rev-parse main)"           # C3b, the pre-merge main tip
+  LOGIN_TIP="$(git rev-parse feature/login)"     # PR1 branch tip (C5)
+  LOGIN_PARENT="$(git rev-parse feature/login~1)" # PR1 earlier commit (C4)
+  BASEURL="$BASE/projects/$PROJECT_KEY/repos/$REPO_SLUG"
+
+  REF_TXT="$TMP/pr8-refs.txt"
+  cat > "$REF_TXT" <<EOF
+Check out #3 — bare PR-number reference to an existing merged PR.
+
+Reference-form test matrix (labels test-1..test5 are stable search anchors):
+
+- test-1 #5
+- test0 $BASEURL/pull-requests/6/overview
+- test1 $BASEURL/commits/$C2
+- test2 $C2
+- test3 ${C2:0:11}
+- test4 $BASEURL/pull-requests/1/commits/$LOGIN_TIP?since=$LOGIN_PARENT
+- test5 $C1...$MAIN_TIP
+EOF
+
+  PR8_ID="$(api POST "$R/pull-requests" "$(py_json "{
+    'title': 'test: reference-form corpus',
+    'description': open('$REF_TXT').read().rstrip(),
+    'state': 'OPEN',
+    'fromRef': {'id': 'refs/heads/$PR8_BRANCH', 'repository': {'slug': '$REPO_SLUG', 'project': {'key': '$PROJECT_KEY'}}},
+    'toRef': {'id': 'refs/heads/main', 'repository': {'slug': '$REPO_SLUG', 'project': {'key': '$PROJECT_KEY'}}},
+    'reviewers': []
+  }")" "ada:ada-pw-123" | jq -r '.id')"
+  log "PR8 id=$PR8_ID"
+
+  # mirror the same reference matrix as a top-level comment (comment-path fidelity)
+  api POST "$R/pull-requests/$PR8_ID/comments" \
+    "$(py_json "{'text': open('$REF_TXT').read().rstrip(), 'severity': 'NORMAL'}")" "ada:ada-pw-123" >/dev/null
+  log "PR8: top-level comment with the reference matrix"
+else
+  log "PR8 exists (id=$PR8_ID)"
+fi
+
+log "PR layer complete. PR ids: PR1=$PR1_ID PR2=$PR2_ID PR3=$PR3_ID PR4=$PR4_ID PR5=$PR5_ID PR6=$PR6_ID PR7=$PR7_ID PR8=$PR8_ID"

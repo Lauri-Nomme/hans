@@ -70,8 +70,11 @@ bb-archiver validate  -> schema self-check of the tar
   branches, tags, force pushes, all PR terminal states, approvals, inline
   comments with orphaned anchors, tasks (BLOCKER comments), unicode/emoji,
   merged-PR-with-deleted-branch (known-bad case), and a **stacked-PR pair**
-  (base PR flips to a commit-less MERGED when its dependent PR merges).
-  Fully reproducible.
+  (base PR flips to a commit-less MERGED when its dependent PR merges). PR 8
+  is a **reference-form corpus**: its description + top-level comment carry a
+  matrix of PR-number/commit references (bare `#N`, PR/commit URLs, full/short
+  shas, `?since=` and range forms) rewritten to real lab targets — see
+  `FIXTURES.md`. Fully reproducible.
 - `corpus/` — paired capture of **both views** of every entity: raw REST dumps
   next to the extracted real admin export, indexed by `manifest.json`.
 - `ground-truth/export-a/` — the extracted real admin export of FIX/golden, the
