@@ -377,6 +377,13 @@ def _harvest_activity_shas(out, prs, project, repo):
                     v = ref.get("latestCommit")
                     if isinstance(v, str) and hex40.match(v):
                         shas.add(v)
+            # allParticipants[].lastReviewedCommit is serialized into the PR
+            # metadata (reviewers carry it); the commit can be one the reviewer
+            # reviewed before a force-push, referenced nowhere else.
+            for rv in (pr_obj.get("reviewers") or []):
+                v = (rv or {}).get("lastReviewedCommit")
+                if isinstance(v, str) and hex40.match(v):
+                    shas.add(v)
         meta_f = out / "rest" / f"pr_{p['id']}.json"
         try:
             meta = json.loads(meta_f.read_text())
