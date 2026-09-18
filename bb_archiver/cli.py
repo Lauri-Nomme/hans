@@ -171,14 +171,13 @@ def _check_json_object_integrity(archive, problems):
             rid_of[name] = m.group(1)
     repos = {}
     for name, rid in rid_of.items():
-        repos.setdefault(rid, {"objs": None, "jsons": []})
         if name.endswith("contents/objects.atl.tar") or name.endswith("objects.atl.tar"):
             f = archive.extractfile(name)
-            repos[rid]["objs"] = f.read() if f else b""
+            repos.setdefault(rid, {"objs": None, "jsons": []})["objs"] = (
+                f.read() if f else b"")
         elif name.endswith(".json.atl.gz") and (
                 "pullRequests/" in name or name.endswith("pullrequests.json.atl.gz")):
-            f = archive.extractfile(name)
-            repos[rid]["jsons"].append(name)
+            repos.setdefault(rid, {"objs": None, "jsons": []})["jsons"].append(name)
     for rid, r in repos.items():
         if r["objs"] is None:
             problems.append(f"repo {rid}: missing objects.atl.tar in archive")

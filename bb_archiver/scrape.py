@@ -339,8 +339,10 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
 
 def _harvest_activity_shas(out, prs, project, repo):
     """Return [(refs/keep/<sha>, sha), ...] for every commit the archive
-    serializes out of the per-PR activity streams that is not otherwise a
-    branch/tag/PR tip:
+    serializes out of the per-PR dumps that is not otherwise a branch/tag/PR
+    tip:
+      - PR metadata fromRef/toRef.latestCommit (a merged PR's toRef can point
+        at a main-tip commit that later became unreachable once main advanced)
       - COMMENTED comment anchors (fromHash/toHash, incl. replies)
       - RESCOPED fromHash/toHash/previousFromHash/previousToHash and
         added/removed commits[].id
@@ -366,6 +368,17 @@ def _harvest_activity_shas(out, prs, project, repo):
             walk_comment(r)
 
     for p in prs:
+        meta_f = out / "rest" / f"pr_{p['id']}.json"
+        try:
+            meta = json.loads(meta_f.read_text())
+        except Exception:
+            meta = None
+        if isinstance(meta, dict):
+            for ref in (meta.get("fromRef"), meta.get("toRef")):
+                if isinstance(ref, dict):
+                    v = ref.get("latestCommit")
+                    if isinstance(v, str) and hex40.match(v):
+                        shas.add(v)
         f = out / "rest" / f"pr_{p['id']}_activities.json"
         try:
             acts = json.loads(f.read_text())
