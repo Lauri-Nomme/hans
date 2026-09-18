@@ -138,6 +138,69 @@ def _check_ref_object_integrity(archive, problems):
                                 f"{sha} (not in objects.atl.tar)")
 
 
+def _iter_json_hex_shas(obj):
+    """Yield every 40-hex SHA in a JSON object tree (dicts/lists/strs)."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_json_hex_shas(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _iter_json_hex_shas(v)
+    elif isinstance(obj, str):
+        if re.fullmatch(r"[0-9a-f]{40}", obj):
+            yield obj
+
+
+def _check_json_object_integrity(archive, problems):
+    """Every commit SHA referenced by the archive's PR metadata/activity JSON
+    must exist in the repo's objects.atl.tar.
+
+    Inline review comments anchor on commits via thread.anchor.fromHash/toHash,
+    RESCOPED activities carry fromHash/toHash/previous*/added/removed commit
+    ids, MERGED carries the merge commit hash, and PR metadata carries
+    fromRef/toRef.latestCommit. None of these are refs — they live only inside
+    the activities/metadata JSON — so ref-only integrity checks cannot see
+    them. If such an object is missing, GEI fails the review thread with
+    REVIEW_THREAD_MISSING_START_COMMIT_OID.
+    """
+    names = archive.getnames()
+    rid_of = {}
+    for name in names:
+        m = re.search(r"/repositor(?:y|ies)/([^/]+)/", name)
+        if m:
+            rid_of[name] = m.group(1)
+    repos = {}
+    for name, rid in rid_of.items():
+        repos.setdefault(rid, {"objs": None, "jsons": []})
+        if name.endswith("contents/objects.atl.tar") or name.endswith("objects.atl.tar"):
+            f = archive.extractfile(name)
+            repos[rid]["objs"] = f.read() if f else b""
+        elif name.endswith(".json.atl.gz") and (
+                "pullRequests/" in name or name.endswith("pullrequests.json.atl.gz")):
+            f = archive.extractfile(name)
+            repos[rid]["jsons"].append(name)
+    for rid, r in repos.items():
+        if r["objs"] is None:
+            problems.append(f"repo {rid}: missing objects.atl.tar in archive")
+            continue
+        with tarfile.open(fileobj=io.BytesIO(r["objs"]), mode="r") as objs_tar:
+            objs = {m.name.replace("/", "") for m in objs_tar.getmembers()}
+        for jname in r["jsons"]:
+            f = archive.extractfile(jname)
+            data = gzip.decompress(f.read()) if f else b""
+            try:
+                obj = json.loads(data)
+            except Exception:
+                problems.append(f"repo {rid}: unparseable JSON {jname}")
+                continue
+            for sha in sorted(set(_iter_json_hex_shas(obj))):
+                if sha not in objs:
+                    problems.append(
+                        f"repo {rid}: {jname} references missing object {sha} "
+                        f"(not in objects.atl.tar) — review thread / activity "
+                        f"for this commit will not import")
+
+
 def cmd_validate(args):
     """Schema self-check vs FORMAT_SPEC: paths exist, JSON parses, pretty/compact
     matches the documented styles, gzip headers sane, and no dangling refs
@@ -154,6 +217,7 @@ def cmd_validate(args):
             elif name.endswith(".tar"):
                 pass
         _check_ref_object_integrity(tar, problems)
+        _check_json_object_integrity(tar, problems)
     _log(f"validated {args.archive}: {len(problems)} problems")
     for p in problems:
         print("  ", p)
