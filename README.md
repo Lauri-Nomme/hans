@@ -292,6 +292,25 @@ theorized:
 - **Not migrated by design** (parity with real exports): LFS contents, CI
   config, branch permissions, repo settings.
 
+### Gaps of the consumer (`gh bbs2gh` / GEI), not `hans`
+
+These are limitations of GitHub Enterprise Importer itself. The archive is
+faithful; GEI cannot represent the data in GitHub's model. Documented so a
+migration's warning log can be triaged against a known, expected list:
+
+- **Review threads placed outside of 10 lines of diff context.** Bitbucket
+  allows inline comments on any line, including unchanged context lines far
+  from any hunk. GitHub can only place inline threads on lines within a hunk's
+  context window, so GEI drops threads anchored >10 lines from a change with
+  `Comment thread in PR N ... placed outside of 10 lines of context ... is not
+  supported`. Verified against the live archive: the anchor lines are genuinely
+  far from the diff hunks (not an off-by-one), so there is nothing the archive
+  could do differently. Accept as expected loss; ~0.2% of threads in a
+  large-repo migration.
+- **Review threads on removed lines.** A comment anchored on a `REMOVED` line
+  has no destination-side line for GitHub to attach to; GEI reports it as not
+  placeable. Same category as above.
+
 ## Repo layout
 
 ```
