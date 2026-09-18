@@ -427,6 +427,42 @@ def _available_objects(git_dir, git="git"):
     return {line.strip() for line in p.stdout.splitlines() if line.strip()}
 
 
+def _fetch_objects_batch(git_dir, auth, shas, batch_limit=5, git="git"):
+    """SHA-fetch `shas` from origin, tolerating unfetchable ones.
+
+    `git fetch origin <sha...>` is batch-atomic: one SHA the server cannot
+    serve (e.g. a commit that was GC'd on the source, only referenced by a
+    long-gone PR) aborts the whole batch with exit 128. On failure we log git's
+    stderr, recursively split and retry both halves, and bottom out per-SHA
+    (<= batch_limit) warning-and-skipping the genuinely unfetchable ones.
+
+    Returns the list of SHAs successfully fetched.
+    """
+    if not shas:
+        return []
+    r = subprocess.run([git, *auth, "fetch", "origin", *shas],
+                       cwd=git_dir, capture_output=True)
+    if r.returncode == 0:
+        return list(shas)
+    if len(shas) <= batch_limit:
+        ok, bad = [], []
+        for s in shas:
+            rr = subprocess.run([git, *auth, "fetch", "origin", s],
+                                cwd=git_dir, capture_output=True)
+            if rr.returncode == 0:
+                ok.append(s)
+            else:
+                bad.append(s)
+                _log(f"git mirror: warning: object {s} could not be fetched "
+                     f"from the source (GC'd / no longer served): "
+                     f"{rr.stderr.strip()[:160]}")
+        return ok
+    _log(f"git mirror: sha-fetch batch failed on {len(shas)} shas — splitting")
+    mid = len(shas) // 2
+    return (_fetch_objects_batch(git_dir, auth, shas[:mid], batch_limit, git)
+            + _fetch_objects_batch(git_dir, auth, shas[mid:], batch_limit, git))
+
+
 def _check_refname(git_dir, name, git="git"):
     """Authoritative refname check via `git check-ref-format` (returns bool)."""
     r = subprocess.run([git, "check-ref-format", name], cwd=git_dir,
@@ -604,10 +640,10 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
              f"fetch did not carry; SHA-fetching {len(shas)} unique object(s) "
              f"(Bitbucket hides refs/stash-refs/*)")
         t0 = time.time()
+        fetched = []
         for i in range(0, len(shas), fetch_batch):
             batch = shas[i:i + fetch_batch]
-            subprocess.run([git, *auth, "fetch", "origin", *batch], check=True,
-                           cwd=git_dir, capture_output=True)
+            fetched.extend(_fetch_objects_batch(git_dir, auth, batch, git=git))
             done = min(i + fetch_batch, len(shas))
             el = time.time() - t0
             rate = done / max(el, 0.001)
@@ -616,6 +652,9 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
             _log(f"git mirror: sha-fetch {done}/{len(shas)} "
                  f"({pct:4.1f}%, {rate:,.1f}/s, "
                  f"ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
+        if len(fetched) < len(shas):
+            _log(f"git mirror: {len(shas) - len(fetched)} object(s) could not "
+                 f"be fetched (GC'd / no longer served on the source)")
 
     # ...then ALWAYS make the refs correct, keyed on REF state not object
     # presence. A resumed run can have the objects present (a prior run fetched
