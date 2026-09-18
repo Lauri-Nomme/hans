@@ -368,6 +368,15 @@ def _harvest_activity_shas(out, prs, project, repo):
             walk_comment(r)
 
     for p in prs:
+        # fromRef/toRef come from the in-memory PR list (always present, even on
+        # a resume where pr_<id>.json may be missing/stale on disk). Fall back
+        # to the on-disk detail only if the list entry lacks them.
+        for pr_obj in (p,):
+            for ref in (pr_obj.get("fromRef"), pr_obj.get("toRef")):
+                if isinstance(ref, dict):
+                    v = ref.get("latestCommit")
+                    if isinstance(v, str) and hex40.match(v):
+                        shas.add(v)
         meta_f = out / "rest" / f"pr_{p['id']}.json"
         try:
             meta = json.loads(meta_f.read_text())
