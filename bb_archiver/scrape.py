@@ -322,11 +322,77 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
             if p.get("state") == "OPEN":
                 needed_refs.append((f"refs/pull-requests/{p['id']}/from", sha))
             needed_refs.append((f"refs/stash-refs/pull-requests/{p['id']}/from", sha))
+        # Inline review comments and RESCOPED/MERGED activities reference commits
+        # that are NOT reachable from any branch/tag/PR tip (e.g. a comment
+        # anchored on an intermediate commit that was force-pushed away). GEI
+        # needs those exact objects to transform review threads
+        # (REVIEW_THREAD_MISSING_START_COMMIT_OID). Harvest every SHA the
+        # archive serializes from the saved activities and require them too,
+        # retained under a refs/keep/<sha> ref so repack does not drop them.
+        needed_refs.extend(_harvest_activity_shas(out, prs, project, repo))
         fetch_mirror(git_dir, base, user, password, project, repo, index,
                      needed_refs=needed_refs)
 
     (out / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
     return index
+
+
+def _harvest_activity_shas(out, prs, project, repo):
+    """Return [(refs/keep/<sha>, sha), ...] for every commit the archive
+    serializes out of the per-PR activity streams that is not otherwise a
+    branch/tag/PR tip:
+      - COMMENTED comment anchors (fromHash/toHash, incl. replies)
+      - RESCOPED fromHash/toHash/previousFromHash/previousToHash and
+        added/removed commits[].id
+      - MERGED commit.id
+    These objects may exist on the source yet be unreachable from any advertised
+    ref; forcing them into the mirror (as refs/keep) keeps GEI's review-thread
+    transform from failing on a missing start commit OID.
+    """
+    import re
+    hex40 = re.compile(r"^[0-9a-f]{40}$")
+    shas = set()
+
+    def walk_comment(c):
+        if not isinstance(c, dict):
+            return
+        anchor = c.get("anchor")
+        if isinstance(anchor, dict):
+            for k in ("fromHash", "toHash"):
+                v = anchor.get(k)
+                if isinstance(v, str) and hex40.match(v):
+                    shas.add(v)
+        for r in c.get("comments") or []:
+            walk_comment(r)
+
+    for p in prs:
+        f = out / "rest" / f"pr_{p['id']}_activities.json"
+        try:
+            acts = json.loads(f.read_text())
+        except Exception:
+            continue
+        for a in acts or []:
+            if not isinstance(a, dict):
+                continue
+            action = a.get("action")
+            if action == "COMMENTED" and isinstance(a.get("comment"), dict):
+                walk_comment(a["comment"])
+            elif action == "RESCOPED":
+                for k in ("fromHash", "toHash", "previousFromHash", "previousToHash"):
+                    v = a.get(k)
+                    if isinstance(v, str) and hex40.match(v):
+                        shas.add(v)
+                for side in ("added", "removed"):
+                    s = a.get(side) or {}
+                    for c in s.get("commits") or []:
+                        v = (c or {}).get("id")
+                        if isinstance(v, str) and hex40.match(v):
+                            shas.add(v)
+            elif action == "MERGED" and isinstance(a.get("commit"), dict):
+                v = a["commit"].get("id")
+                if isinstance(v, str) and hex40.match(v):
+                    shas.add(v)
+    return [(f"refs/keep/{s}", s) for s in sorted(shas)]
 
 
 def git_mirror_url(base, user, password, project, repo):
