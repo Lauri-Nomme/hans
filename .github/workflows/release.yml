@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+# Serialize runs so two quick pushes don't compute the same version tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute next version
+        id: version
+        run: |
+          latest=$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ -z "$latest" ]; then
+            version="1.0.0"
+          else
+            major=${latest%%.*}
+            minor=$(echo "$latest" | sed -E 's/^[0-9]+\.([0-9]+)\..*/\1/')
+            version="${major}.$((minor + 1)).0"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble release payload
+        run: |
+          set -e
+          mkdir -p stage/bb_archiver \
+                   stage/tools/bb-merge-base/dist \
+                   stage/tools/bb-obj-tar/dist
+          cp README.md stage/
+          cp requirements.txt stage/
+          cp bb-archiver stage/
+          cp bb_archiver/*.py stage/bb_archiver/
+          cp corpus/gate3.py stage/tools/gate3.py
+          cp tools/bb-merge-base/dist/* stage/tools/bb-merge-base/dist/
+          cp tools/bb-obj-tar/dist/* stage/tools/bb-obj-tar/dist/
+          tar -C stage -czf "hans-${{ steps.version.outputs.version }}.tar.gz" .
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          gh release create "$version" \
+            "hans-${version}.tar.gz" \
+            --target "${{ github.sha }}" \
+            --title "hans $version" \
+            --notes "hans release $version: bb-archiver + Rust helper binaries + gate3 verification tool."
