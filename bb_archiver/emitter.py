@@ -265,8 +265,13 @@ class Emitter:
                 c = a.get("comment")
                 if c is None:
                     continue
-                comments.append(self._ev("COMMENT:ADDED", ts, slug,
-                                         {"comment": self._comment(c)}))
+                # ADDED carries the comment's OWN creation time (matches the
+                # real exporter), not the activity time — otherwise an edit's
+                # EDITED (comment.updatedDate) could precede its ADDED once
+                # comments are sorted chronologically.
+                comments.append(self._ev("COMMENT:ADDED",
+                                          c.get("createdDate", ts), slug,
+                                          {"comment": self._comment(c)}))
                 comments.extend(self._comment_events(c))
             elif action == "UPDATED" and (a.get("addedReviewers") or a.get("removedReviewers")):
                 others.append(self._ev("REVIEWERS:UPDATED", ts, slug, OrderedDict([
@@ -304,12 +309,12 @@ class Emitter:
                 others.append(self._ev("MERGED", ts, slug, OrderedDict(items)))
             else:
                 others.append(self._ev("ACTIVITY", ts, slug, {"action": action}))
-        # Comment records preserve natural emission order (per REST activity),
-        # so a COMMENT:ADDED always precedes its own EDITED/REPLIED markers.
-        # Sorting them by createdTimestamp is wrong: ADDED uses the activity
-        # time but EDITED/REPLIED use the comment's own dates, so an edit can
-        # sort before the ADDED carrying the referenced comment, which breaks
-        # import. Non-comment records are still ordered chronologically.
+        # Comment block is ordered chronologically by createdTimestamp (matches the
+        # real exporter). ADDED uses the comment's own creation time, and its
+        # REPLIED/EDITED markers carry reply create / comment update times which
+        # are always >= it, so a comment's ADDED never sorts after its own
+        # markers. Python sort is stable, so equal timestamps keep ADDED-first.
+        comments.sort(key=lambda e: e["createdTimestamp"])
         others.sort(key=lambda e: e["createdTimestamp"])
         return _gzbuf(jw.pretty(comments + others).encode())
 
