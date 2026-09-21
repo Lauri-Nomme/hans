@@ -19,7 +19,7 @@ import sys
 import tarfile
 from collections import OrderedDict
 
-PR_IDS = (1, 2, 3, 4, 5, 6, 7, 8)
+PR_IDS = (1, 2, 3, 4, 5, 6, 7, 8, 9)
 
 
 def _decomp(tf, name):
