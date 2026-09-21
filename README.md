@@ -310,6 +310,17 @@ migration's warning log can be triaged against a known, expected list:
 - **Review threads on removed lines.** A comment anchored on a `REMOVED` line
   has no destination-side line for GitHub to attach to; GEI reports it as not
   placeable. Same category as above.
+- **Review threads anchored on an orphaned/intermediate commit**
+  (`REVIEW_THREAD_MISSING_START_COMMIT_OID`). An inline comment made on an
+  earlier head of a force-pushed PR anchors on a commit that is not the PR's
+  final head. The archive faithfully retains that commit (object present,
+  reachable, base-is-ancestor — validated), exactly as a real Bitbucket export
+  does; GEI still cannot attach the thread because the anchor commit is not the
+  imported PR's head. Verified on the lab (9.4.18): the drift processor either
+  re-anchors such comments to the current head or deletes them when the line is
+  removed, so truly orphaned threads cannot even be produced via the API — they
+  come from data that predates/escapes this behavior. No archive-side fix is
+  possible without fabricating a PR-head relationship; accept as expected loss.
 
 ## Repo layout
 
