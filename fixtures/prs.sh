@@ -401,6 +401,11 @@ if [[ -z "$PR9_ID" ]]; then
   log "PR9 id=$PR9_ID"
 fi
 
+# start-of-PR reference second (for reflog timestamp-rule analysis)
+PR9_CREATED="$(api GET "$R/pull-requests/$PR9_ID" | jq -r '.createdDate')"
+log "PR9 createdDate=$PR9_CREATED"
+sleep 15
+
 # --- v1 diff: comment + reply + edit (before any push) ------------------------
 V1_LINE="$(diff_line "$PR9_ID" "interleaved.md" "ADDED" | head -1)"
 V1_CID="$(api POST "$R/pull-requests/$PR9_ID/comments" \
@@ -423,6 +428,10 @@ cat > interleaved.md <<'EOF'
 EOF
 git add interleaved.md
 mkcommit "Grace Hopper" "grace@example.com" "Grace Hopper" "grace@example.com" "2024-05-11T10:00:00+00:00" "feat: interleaved v2"
+# 15s settle so force-push events land in distinct wall-clock seconds (the
+# reflog/RESCOPED timestamp rule can then be told apart: PR-creation time for
+# all lines vs per-RESCOPED ceil'd time).
+sleep 15
 push_branches "ada:ada-pw-123" "+refs/heads/$PR9_BRANCH"
 V2_TIP="$(git rev-parse "$PR9_BRANCH")"
 log "PR9: force-pushed to v2 ($V2_TIP) -> v1 anchor orphaned"
@@ -457,6 +466,7 @@ cat > interleaved.md <<'EOF'
 EOF
 git add interleaved.md
 mkcommit "Alan Turing" "alan@example.com" "Alan Turing" "alan@example.com" "2024-05-12T11:00:00+00:00" "feat: interleaved v3"
+sleep 15
 push_branches "ada:ada-pw-123" "+refs/heads/$PR9_BRANCH"
 V3_TIP="$(git rev-parse "$PR9_BRANCH")"
 log "PR9: force-pushed to v3 ($V3_TIP) -> v2 anchor orphaned"

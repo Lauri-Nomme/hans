@@ -415,10 +415,14 @@ class Emitter:
     # ---------------- git skeleton ---------------------------------------
     def _reflog(self, pr, activities):
         """Create line (0000 -> initial tip, floor sec) then one line per
-        RESCOPED (old -> new), Bitbucket Mesh identity. The real exporter uses
-        the PR's creation time (floored to sec) for EVERY line — not a
-        per-RESCOPED timestamp (verified on the multi-push PR9 fixture).
-        RESCOPEDs are sorted chronologically (REST returns them newest-first)."""
+        RESCOPED (old -> new), Bitbucket Mesh identity.
+
+        Timestamp rule (verified against a real export where the PR creation
+        and each force-push landed in distinct seconds): the 0000->initial line
+        is floored to the PR's createdDate second; each RESCOPED line is
+        floored to that RESCOPED activity's own createdDate second. NOT PR
+        creation time for all lines, and not ceil'd. RESCOPEDs are sorted
+        chronologically (REST returns them newest-first)."""
         resc = sorted(
             ((a["createdDate"], a["previousFromHash"], a["fromHash"])
              for a in activities if a.get("action") == "RESCOPED"),
@@ -426,8 +430,8 @@ class Emitter:
         created = pr.get("createdDate", 0) // 1000
         initial = resc[0][1] if resc else pr["fromRef"]["latestCommit"]
         lines = [f"{'0'*40} {initial} Bitbucket Mesh <bitbucket.mesh@atlassian.com> {created} +0000\n"]
-        for _, old, new in resc:
-            lines.append(f"{old} {new} Bitbucket Mesh <bitbucket.mesh@atlassian.com> {created} +0000\n")
+        for ts, old, new in resc:
+            lines.append(f"{old} {new} Bitbucket Mesh <bitbucket.mesh@atlassian.com> {ts // 1000} +0000\n")
         return "".join(lines).encode()
 
     def _available_objects(self):
