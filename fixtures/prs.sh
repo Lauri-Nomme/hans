@@ -385,4 +385,98 @@ else
   log "PR8 exists (id=$PR8_ID)"
 fi
 
-log "PR layer complete. PR ids: PR1=$PR1_ID PR2=$PR2_ID PR3=$PR3_ID PR4=$PR4_ID PR5=$PR5_ID PR6=$PR6_ID PR7=$PR7_ID PR8=$PR8_ID"
+# ------------------------------- PR 9: INTERLEAVED ----------------------------
+# Comment/reply/edit on v1 -> force-push v2 (orphans v1 anchors) -> comment/reply
+# on v2 -> force-push v3 (orphans v2 anchors) -> comment on v3. Mirrors the
+# production REVIEW_THREAD_MISSING pattern: inline anchors made on an earlier
+# head, then the branch was force-pushed away under them.
+PR9_BRANCH=feature/interleaved
+PR9_ID="$(pr_by_branch "$PR9_BRANCH")"
+if [[ -z "$PR9_ID" ]]; then
+  log "creating PR9 ($PR9_BRANCH -> main, OPEN with interleaved comments/pushes)"
+  PR9_ID="$(pr_create "ada:ada-pw-123" \
+    '"feat: interleaved comment/push interleave"' \
+    '"Comments and replies interleaved with force-pushes; inline anchors made on earlier heads are orphaned by later RESCOPEDs."' \
+    "$PR9_BRANCH" '[{"user":{"name":"grace"}}]' | jq -r '.id')"
+  log "PR9 id=$PR9_ID"
+fi
+
+# --- v1 diff: comment + reply + edit (before any push) ------------------------
+V1_LINE="$(diff_line "$PR9_ID" "interleaved.md" "ADDED" | head -1)"
+V1_CID="$(api POST "$R/pull-requests/$PR9_ID/comments" \
+  "$(py_json "{'text': 'v1: inline on added line', 'anchor': {'line': $V1_LINE, 'lineType': 'ADDED', 'fileType': 'TO', 'path': 'interleaved.md'}}")" | jq -r '.id')"
+log "PR9: v1 inline comment $V1_CID line=$V1_LINE"
+V1_REPLY="$(api POST "$R/pull-requests/$PR9_ID/comments" \
+  "$(py_json "{'text': 'v1: reply', 'parent': {'id': $V1_CID}}")" | jq -r '.id')"
+api PUT "$R/pull-requests/$PR9_ID/comments/$V1_CID" \
+  "$(py_json "{'version': 0, 'text': 'v1: inline on added line (edited)'}")" >/dev/null
+log "PR9: v1 reply $V1_REPLY + edit of $V1_CID"
+
+# --- force-push v1 -> v2 (RESCOPED, orphans v1 anchor) -------------------------
+git checkout -q "$PR9_BRANCH"
+cat > interleaved.md <<'EOF'
+# Interleaved
+
+- line v2 alpha
+- line v2 beta
+- line v2 gamma
+EOF
+git add interleaved.md
+mkcommit "Grace Hopper" "grace@example.com" "Grace Hopper" "grace@example.com" "2024-05-11T10:00:00+00:00" "feat: interleaved v2"
+push_branches "ada:ada-pw-123" "+refs/heads/$PR9_BRANCH"
+V2_TIP="$(git rev-parse "$PR9_BRANCH")"
+log "PR9: force-pushed to v2 ($V2_TIP) -> v1 anchor orphaned"
+
+# wait for the drift processor to re-anchor/reset before new diff comments.
+# The v1 comment's anchor should advance to V2_TIP (or flush); poll briefly.
+for _ in $(seq 1 20); do
+  AH="$(api GET "$R/pull-requests/$PR9_ID/comments?path=interleaved.md&limit=100" 2>/dev/null \
+    | jq -r --argjson id "$V1_CID" '.values[] | select(.id==$id) | .anchor.toHash // ""' | head -1)"
+  [[ -n "$AH" ]] && break
+  sleep 1
+done
+log "PR9: after v1->v2 push, v1 anchor -> $AH"
+
+# --- v2 diff: comment + reply (now anchored on v2) ----------------------------
+V2_LINE="$(diff_line "$PR9_ID" "interleaved.md" "ADDED" | head -1)"
+V2_CID="$(api POST "$R/pull-requests/$PR9_ID/comments" \
+  "$(py_json "{'text': 'v2: inline on added line', 'anchor': {'line': $V2_LINE, 'lineType': 'ADDED', 'fileType': 'TO', 'path': 'interleaved.md'}}")" | jq -r '.id')"
+log "PR9: v2 inline comment $V2_CID line=$V2_LINE"
+V2_REPLY="$(api POST "$R/pull-requests/$PR9_ID/comments" \
+  "$(py_json "{'text': 'v2: reply', 'parent': {'id': $V2_CID}}")" | jq -r '.id')"
+log "PR9: v2 reply $V2_REPLY"
+
+# --- force-push v2 -> v3 (RESCOPED, orphans v2 anchor) -------------------------
+cat > interleaved.md <<'EOF'
+# Interleaved
+
+- line v3 alpha
+- line v3 beta
+- line v3 gamma
+- line v3 delta
+EOF
+git add interleaved.md
+mkcommit "Alan Turing" "alan@example.com" "Alan Turing" "alan@example.com" "2024-05-12T11:00:00+00:00" "feat: interleaved v3"
+push_branches "ada:ada-pw-123" "+refs/heads/$PR9_BRANCH"
+V3_TIP="$(git rev-parse "$PR9_BRANCH")"
+log "PR9: force-pushed to v3 ($V3_TIP) -> v2 anchor orphaned"
+
+for _ in $(seq 1 20); do
+  AH="$(api GET "$R/pull-requests/$PR9_ID/comments?path=interleaved.md&limit=100" 2>/dev/null \
+    | jq -r --argjson id "$V2_CID" '.values[] | select(.id==$id) | .anchor.toHash // ""' | head -1)"
+  [[ -n "$AH" ]] && break
+  sleep 1
+done
+log "PR9: after v2->v3 push, v2 anchor -> $AH"
+
+# --- v3 diff: comment (last op; leave OPEN) -----------------------------------
+V3_LINE="$(diff_line "$PR9_ID" "interleaved.md" "ADDED" | head -1)"
+api POST "$R/pull-requests/$PR9_ID/comments" \
+  "$(py_json "{'text': 'v3: inline on added line', 'anchor': {'line': $V3_LINE, 'lineType': 'ADDED', 'fileType': 'TO', 'path': 'interleaved.md'}}")" >/dev/null
+log "PR9: v3 inline comment line=$V3_LINE"
+
+# reviewer state AFTER all pushes (any PR mutation resets them)
+api POST "$R/pull-requests/$PR9_ID/approve" "" grace:grace-pw-123 >/dev/null || true
+log "PR9: grace approves final state (after all interleaved ops)"
+
+log "PR layer complete. PR ids: PR1=$PR1_ID PR2=$PR2_ID PR3=$PR3_ID PR4=$PR4_ID PR5=$PR5_ID PR6=$PR6_ID PR7=$PR7_ID PR8=$PR8_ID PR9=$PR9_ID"

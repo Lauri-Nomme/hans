@@ -252,6 +252,22 @@ EOF
   # lightweight tag v1.0 -> C1
   git tag v1.0 "$C1"
 
+  # feature/interleaved: comment/push/comment/push/comment SOURCE material.
+  # v1 only here — prs.sh force-pushes v2/v3 on top (like PR6's push), so PR9
+  # can interleave comments with the RESCOPEDs and orphan inline anchors
+  # (mirrors the production REVIEW_THREAD_MISSING pattern).
+  git checkout -q main
+  git branch feature/interleaved
+  git checkout -q feature/interleaved
+  cat > interleaved.md <<'EOF'
+# Interleaved
+
+- line v1 alpha
+- line v1 beta
+EOF
+  git add interleaved.md
+  mkcommit "Ada Lovelace" "ada@example.com" "Ada Lovelace" "ada@example.com" "2024-05-10T09:00:00+00:00" "feat: interleaved v1"
+
   # back to main
   git checkout -q main
 
@@ -261,6 +277,7 @@ EOF
     "+refs/heads/main" "+refs/heads/feature/login" "+refs/heads/hotfix/critical" \
     "+refs/heads/experiment/squash" "+refs/heads/feature/explore" "+refs/heads/feature/declined" \
     "+refs/heads/feature/stacked/base" "+refs/heads/feature/stacked/dependent" \
+    "+refs/heads/feature/interleaved" \
     "+refs/tags/v1.0"
 
   log "git layer pushed (main + 7 feature branches + lightweight tag v1.0)"

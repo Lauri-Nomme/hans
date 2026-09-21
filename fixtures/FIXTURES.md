@@ -96,6 +96,7 @@ C3b feat: add explore placeholder page                    (alan)  <- main tip
 | 6  | feature/explore | OPEN (RESCOPED) | inline ADDED/REMOVED/CONTEXT/file-level comments, force-push RESCOPED, drift-re-anchored added-line comment, title edit after push, grace approve→withdraw→re-approve, alan NEEDS_WORK, **open task (BLOCKER)** |
 | 7  | feature/declined | DECLINED | ada approve + comment + withdraw, hard-deleted comment, decline activity |
 | 8  | feature/references | OPEN | **reference-form corpus**: description + top-level comment both carry a PR-number/commit reference matrix — bare `#N` refs, PR-overview & commit URLs, bare full/short shas, a `.../commits/<sha>?since=<sha>` PR-commits URL, and a `sha...sha` range. All rewritten to **real lab targets** (`http://localhost:7990/projects/FIX/repos/golden/...`, PRs #1-7, real commit shas) so GitHub can auto-link them post-import. No reviewers/state ops. Created **last** so PR ids 1-7 keep their numbers. |
+| 9  | feature/interleaved | OPEN | **interleaved comment/push interleave**: inline comment + reply + edit on v1 head, force-push to v2 (orphans v1 anchor), inline comment + reply on v2, force-push to v3 (orphans v2 anchor), inline comment on v3, grace approves last. Produces two RESCOPEDs with orphaned inline threads between them — mirrors the production `REVIEW_THREAD_MISSING_START_COMMIT_OID` pattern. |
 
 > PR ids 4/5 are the stacked pair (created before PR4/PR5 of the earlier 5-PR
 > corpus). PR4/PR5 of that older corpus are now PR 6/7 here. Reviewer states on
@@ -109,8 +110,8 @@ C3b feat: add explore placeholder page                    (alan)  <- main tip
 > anchors. The matrix targets real entities: `#3`/`#5` are existing PRs, the
 > URLs resolve to PRs/commits of the golden repo, and the shas/range are real
 > commits on `main` (C1/C2/C3b via the `v1.0` tag and `main`/`feature/login`
-> refs). Adding PR 8 changes the corpus: the golden export (`ground-truth/`,
-> 7 PRs) and the corpus REST dumps must be re-captured after rebuilding.
+> refs). Adding PR 8/9 changes the corpus: the golden export (`ground-truth/`,
+> 9 PRs) and the corpus REST dumps must be re-captured after rebuilding.
 
 - Commit-level comment on C2 (anchored to src/util.py) — observe whether/how the
   real export encodes it.
