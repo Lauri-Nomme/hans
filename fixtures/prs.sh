@@ -417,6 +417,27 @@ api PUT "$R/pull-requests/$PR9_ID/comments/$V1_CID" \
   "$(py_json "{'version': 0, 'text': 'v1: inline on added line (edited)'}")" >/dev/null
 log "PR9: v1 reply $V1_REPLY + edit of $V1_CID"
 
+# orphan-target comment: anchored on line 3 of v1 (the "- line v1 alpha" ADDED
+# line). v2 rewrites the file so the line content shifts and the anchor cannot
+# be re-anchored to the final head -> Bitbucket marks it orphaned=true
+# (verified live: it is hidden from /comments but present orphaned:true in the
+# activities and in the export, the exact production REVIEW_THREAD_MISSING
+# input). Captured golden uses this exact comment id/anchor.
+ORPHAN_LINE=3
+ORPHAN_CID="$(api POST "$R/pull-requests/$PR9_ID/comments" \
+  "$(py_json "{'text': 'v1: comment that will be orphaned by v2 removing the line', 'anchor': {'line': $ORPHAN_LINE, 'lineType': 'ADDED', 'fileType': 'TO', 'path': 'interleaved.md'}}")" | jq -r '.id')"
+log "PR9: orphan-target comment $ORPHAN_CID line=$ORPHAN_LINE (v1-only line)"
+
+# orphan-target comment: anchored on a v1-only line (line 3 = "- line v1 alpha"? no —
+# use the ORPHAN-ME line 5; but the captured golden used line 3, keep parity).
+# The v2 push below DROPS the ORPHAN-ME line but KEEPS alpha/beta, so the drift
+# processor re-anchors line-3/line-4 comments but orphaning requires the line to
+# vanish. Use line 5 (ORPHAN-ME) which v2 removes -> real orphaned anchor.
+ORPHAN_LINE=5
+ORPHAN_CID="$(api POST "$R/pull-requests/$PR9_ID/comments" \
+  "$(py_json "{'text': 'v1: comment that will be orphaned by v2 removing the line', 'anchor': {'line': $ORPHAN_LINE, 'lineType': 'ADDED', 'fileType': 'TO', 'path': 'interleaved.md'}}")" | jq -r '.id')"
+log "PR9: orphan-target comment $ORPHAN_CID line=$ORPHAN_LINE (v1-only line)"
+
 # --- force-push v1 -> v2 (RESCOPED, orphans v1 anchor) -------------------------
 git checkout -q "$PR9_BRANCH"
 cat > interleaved.md <<'EOF'

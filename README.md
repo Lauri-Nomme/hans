@@ -316,11 +316,12 @@ migration's warning log can be triaged against a known, expected list:
   final head. The archive faithfully retains that commit (object present,
   reachable, base-is-ancestor — validated), exactly as a real Bitbucket export
   does; GEI still cannot attach the thread because the anchor commit is not the
-  imported PR's head. Verified on the lab (9.4.18): the drift processor either
-  re-anchors such comments to the current head or deletes them when the line is
-  removed, so truly orphaned threads cannot even be produced via the API — they
-  come from data that predates/escapes this behavior. No archive-side fix is
-  possible without fabricating a PR-head relationship; accept as expected loss.
+  imported PR's head. Reproduced in the lab golden (PR9): Bitbucket marks such a
+  comment `orphaned:true` — it vanishes from the `/comments` listing but
+  survives in the activities and in the admin export (which `hans` round-trips
+  identically). The residual failures are thus GEI's handling of data Bitbucket
+  itself produces; no archive-side fix is possible without fabricating a
+  PR-head relationship. Accept as expected loss.
 
 ## Repo layout
 
