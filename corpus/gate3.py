@@ -237,17 +237,23 @@ def verify_git_objects(scrape_git, org_repo, client, report):
     import shutil
     tmp = tempfile.mkdtemp(prefix="gate3-obj-")
     try:
+        log("git objects: fetching GH refs into temp bare repo (this is the "
+            "long-est step; large repos take minutes to tens of minutes)")
         r = git(["init", "-q", "--bare", tmp])
         url = f"https://x-access-token:{client.token}@github.com/{org_repo}.git"
         # shallow-ish: fetch all refs once (objects will be compared by content)
+        log("git objects: git fetch (no tags) — no progress sub-reporting; "
+            "watch w/ `git -C %s count-objects -v` or top on your side" % tmp)
         r = subprocess.run(["git", "-C", tmp, "fetch", "--prune", "--no-tags",
                             url, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"],
                            capture_output=True, text=True, timeout=3600)
         if r.returncode != 0:
             report["genuine"].append(f"git fetch for objects failed: {r.stderr[:200]}")
             return False
+        log("git objects: fetch done; building object maps")
 
-        def objmap(gd):
+        def objmap(gd, label):
+            log(f"git objects: cat-file --batch-all-objects ({label})")
             r = subprocess.run(["git", "-C", gd, "cat-file", "--batch-all-objects",
                                 "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
                                capture_output=True, text=True, timeout=3600)
@@ -257,8 +263,9 @@ def verify_git_objects(scrape_git, org_repo, client, report):
                 m[sha] = typ
             return m
 
-        la = objmap(scrape_git)
-        lb = objmap(tmp)
+        la = objmap(scrape_git, "BB")
+        lb = objmap(tmp, "GH")
+        log("git objects: comparing")
         only_a = set(la) - set(lb)
         only_b = set(lb) - set(la)
         same = set(la) & set(lb)
@@ -296,7 +303,9 @@ def gh_state(pr):
 
 
 def verify_pr_list(prs, client, org_repo, report):
+    log("PR list: fetching GH pulls (state=all)")
     gh_prs = list(client.paginate(f"/repos/{org_repo}/pulls", {"state": "all"}))
+    log(f"PR list: fetched {len(gh_prs)} GH PRs (BB has {len(prs)})")
     report["notes"].append(f"PR counts: BB={len(prs)} GH={len(gh_prs)}")
     if len(prs) != len(gh_prs):
         report["genuine"].append(f"PR count mismatch: BB={len(prs)} GH={len(gh_prs)}")
@@ -434,15 +443,23 @@ def main():
 
     # --- git layer -------------------------------------------------------
     scrape_git = Path(args.scrape) / "git"
+    log("phase: git refs")
     verify_git_refs(scrape_git, org_repo, client, report)
     if not args.no_git_objects:
+        log("phase: git objects")
         verify_git_objects(scrape_git, org_repo, client, report)
+    else:
+        log("skipping git-objects compare (--no-git-objects)")
 
     # --- PR layer --------------------------------------------------------
+    log("phase: PR list")
     verify_pr_list(prs, client, org_repo, report)
     if args.deep:
+        log("phase: deep per-PR (reviews/comments)")
         verify_pr_deep(prs, client, org_repo, report, args.state,
                        args.limit_prs, args.progress_every, rest)
+    else:
+        log("skipping deep per-PR (no --deep)")
 
     # --- summary ----------------------------------------------------------
     log("=== GATE 3 ===")
