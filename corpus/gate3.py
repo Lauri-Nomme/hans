@@ -355,64 +355,90 @@ def bb_top_comments(rest, pid):
 
 def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                    progress_every, rest):
-    """Per-PR reviews + comment body compare. Resumable via state file."""
+    """Per-PR reviews + comment body compare. Resumable via state file.
+
+    Findings are appended to `<state>.deep.jsonl` per PR (one JSON object per
+    line), so a partial/crashed run keeps the mismatches it already found even
+    though the final summary only prints at completion. On resume, prior
+    records are loaded so the in-memory report stays complete."""
     done = set()
     if state_path and os.path.exists(state_path):
         try:
             done = set(json.loads(open(state_path).read()).get("deep_done", []))
         except Exception:
             pass
+    deep_path = (state_path + ".deep.jsonl") if state_path else None
+    deepf = None
+    if deep_path and os.path.exists(deep_path):
+        # seed in-memory report from prior partial runs so the summary is complete
+        try:
+            for line in open(deep_path, encoding="utf-8"):
+                line = line.strip()
+                if line:
+                    report["deep"].append(json.loads(line))
+        except Exception:
+            pass
     todo = sorted(p["id"] for p in prs)[:limit_prs] if limit_prs else sorted(p["id"] for p in prs)
     todo = [n for n in todo if n not in done]
     total = len(todo)
     pr_by_id = {p["id"]: p for p in prs}
-    for i, n in enumerate(todo, 1):
-        reviews = client.get(f"/repos/{org_repo}/pulls/{n}/reviews", {"per_page": 100}) or []
-        comments = client.get(f"/repos/{org_repo}/issues/{n}/comments", {"per_page": 100}) or []
-        # reviewers expected from BB scrape
-        bb = pr_by_id.get(n, {})
-        bb_rev = sorted(r.get("user", {}).get("slug") or r.get("user", {}).get("name")
-                        for r in (bb.get("reviewers") or []))
-        gh_rev = sorted({r.get("user", {}).get("login") for r in reviews
-                         if r.get("state") in ("APPROVED", "CHANGES_REQUESTED")})
-        # Reviewers on GH are mapped by email; mannequins adopt hashed logins,
-        # so mismatches are advisory, not hard failures. Compare as sets.
-        bb_set = set(bb_rev)
-        gh_set = {x.split("__")[0].split("_")[0] for x in gh_rev}  # crude normalize
-        if bb_set and gh_set and bb_set != gh_set:
-            report["notes"].append(
-                f"PR {n}: reviewer set differs BB={sorted(bb_set)} GH={sorted(gh_set)} "
-                f"(mannequin mapping is expected to differ)")
+    if deepf is None and deep_path:
+        deepf = open(deep_path, "a", encoding="utf-8")
+    try:
+        for i, n in enumerate(todo, 1):
+            reviews = client.get(f"/repos/{org_repo}/pulls/{n}/reviews", {"per_page": 100}) or []
+            comments = client.get(f"/repos/{org_repo}/issues/{n}/comments", {"per_page": 100}) or []
+            # reviewers expected from BB scrape
+            bb = pr_by_id.get(n, {})
+            bb_rev = sorted(r.get("user", {}).get("slug") or r.get("user", {}).get("name")
+                            for r in (bb.get("reviewers") or []))
+            gh_rev = sorted({r.get("user", {}).get("login") for r in reviews
+                             if r.get("state") in ("APPROVED", "CHANGES_REQUESTED")})
+            # Reviewers on GH are mapped by email; mannequins adopt hashed logins,
+            # so mismatches are advisory, not hard failures. Compare as sets.
+            bb_set = set(bb_rev)
+            gh_set = {x.split("__")[0].split("_")[0] for x in gh_rev}  # crude normalize
+            if bb_set and gh_set and bb_set != gh_set:
+                report["notes"].append(
+                    f"PR {n}: reviewer set differs BB={sorted(bb_set)} GH={sorted(gh_set)} "
+                    f"(mannequin mapping is expected to differ)")
 
-        # comment bodies: every BB top-level PR comment should appear (normalized)
-        # in some GH issue comment (GH flattens threads + applies markdown).
-        bb_bodies = bb_top_comments(rest, n)
-        gh_bodies = [norm_comment(c.get("body")) for c in comments]
-        missing = []
-        for b in bb_bodies:
-            if not any(norm_comment(b) in g or g in norm_comment(b) for g in gh_bodies):
-                missing.append(b[:120])
-        if missing:
-            report["notes"].append(f"PR {n}: {len(missing)} BB comment(s) not found on GH")
-            for m in missing[:5]:
-                report["notes"].append(f"   missing: {m!r}")
+            # comment bodies: every BB top-level PR comment should appear (normalized)
+            # in some GH issue comment (GH flattens threads + applies markdown).
+            bb_bodies = bb_top_comments(rest, n)
+            gh_bodies = [norm_comment(c.get("body")) for c in comments]
+            missing = []
+            for b in bb_bodies:
+                if not any(norm_comment(b) in g or g in norm_comment(b) for g in gh_bodies):
+                    missing.append(b[:120])
+            if missing:
+                report["notes"].append(f"PR {n}: {len(missing)} BB comment(s) not found on GH")
+                for m in missing[:5]:
+                    report["notes"].append(f"   missing: {m!r}")
 
-        report["deep"].append({
-            "pr": n,
-            "bb_reviewers": bb_rev,
-            "gh_reviewers": gh_rev,
-            "bb_comment_count": len(bb_bodies),
-            "gh_comment_count": len(comments),
-            "gh_comment_missing": len(missing),
-            "gh_review_count": len(reviews),
-        })
-        done.add(n)
-        if state_path:
-            json.dump({"deep_done": sorted(done)},
-                      open(state_path, "w"))
-        if i % progress_every == 0 or i == total:
-            pct = 100.0 * i / total if total else 100.0
-            log(f"deep {i}/{total} ({pct:.0f}%) remaining={client.remaining}")
+            rec = {
+                "pr": n,
+                "bb_reviewers": bb_rev,
+                "gh_reviewers": gh_rev,
+                "bb_comment_count": len(bb_bodies),
+                "gh_comment_count": len(comments),
+                "gh_comment_missing": len(missing),
+                "gh_review_count": len(reviews),
+            }
+            report["deep"].append(rec)
+            if deepf:
+                deepf.write(json.dumps(rec) + "\n")
+                deepf.flush()
+            done.add(n)
+            if state_path:
+                json.dump({"deep_done": sorted(done)},
+                          open(state_path, "w"))
+            if i % progress_every == 0 or i == total:
+                pct = 100.0 * i / total if total else 100.0
+                log(f"deep {i}/{total} ({pct:.0f}%) remaining={client.remaining}")
+    finally:
+        if deepf:
+            deepf.close()
 
 
 def main():
