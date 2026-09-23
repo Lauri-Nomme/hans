@@ -15,12 +15,18 @@ Design for scale:
     with backoff, reads `Link:` pagination, optional ETag 304 caching.
   - State checkpoint (`--state file`): completed PR ids persisted so a rerun
     resumes instead of restarting; safe to Ctrl-C / run across rate-limit windows.
+  - Optional persistent cache (`--cache file`): every GH API response is saved
+    to a JSON file and served from disk on re-runs (no network for cached URLs),
+    cutting a 3-hour validation cycle to seconds. `--refresh` revalidates via
+    ETag instead. Only the REST calls (PR list + deep) are cached — the git
+    layer uses `git`/ls-remote directly and always re-checks.
   - Progress: line every `--progress-every` PRs with counts + rate-limit budget.
   - Dependencies: stdlib only (urllib + subprocess git).
 
 Usage:
   python3 corpus/gate3.py --scrape ./scrape/FIX-golden --org ORG --repo REPO \
-      --pat ghp_... [--no-git-objects] [--deep] [--state gate3-state.json]
+      --pat ghp_... [--no-git-objects] [--deep] [--state gate3-state.json] \
+      [--cache gh-cache.json] [--refresh]
 """
 import argparse
 import json
@@ -58,17 +64,46 @@ def norm_comment(text):
 
 
 class RateLimitClient:
-    """urllib wrapper: rate-limit aware, retry with backoff, ETag cache, paginate."""
+    """urllib wrapper: rate-limit aware, retry with backoff, persistent cache, paginate.
 
-    def __init__(self, token, cache=None, quiet=False, budget_headroom=10):
+    The cache persists across runs (one JSON file mapping request-URL -> body+etag),
+    so a repeat gate3 run iterates on data it already fetched instead of re-querying
+    GitHub. By default a cached URL is served from disk without a network call
+    (post-migration validation is against a static GH state); pass refresh=True to
+    request revalidation via ETag."""
+
+    def __init__(self, token, cache_path=None, quiet=False, budget_headroom=10,
+                 refresh=False):
         self.token = token
-        self.cache = cache or {}          # path -> (etag, body)
         self.quiet = quiet
         self.budget_headroom = budget_headroom
+        self.refresh = refresh
         self.requests = 0
         self.limit = None
         self.remaining = None
         self.reset = None
+        self._cache_path = cache_path
+        self._disk = {}
+        if cache_path and os.path.exists(cache_path):
+            try:
+                self._disk = json.loads(open(cache_path, encoding="utf-8").read())
+            except Exception:
+                self._disk = {}
+
+    def _save(self):
+        if self._cache_path:
+            try:
+                tmp = self._cache_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self._disk, f)
+                os.replace(tmp, self._cache_path)
+            except Exception as e:
+                log(f"cache write failed: {e}")
+
+    def cached_body(self, url):
+        """Body from an earlier run for this exact URL, or None."""
+        ent = self._disk.get(url)
+        return ent.get("body") if ent else None
 
     def _headers(self, etag=None):
         h = {"Authorization": f"Bearer {self.token}",
@@ -104,9 +139,15 @@ class RateLimitClient:
         url = f"{API}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
+        # 1) unconditional local replay: serve cached body, no network
+        if use_cache and not self.refresh:
+            cached = self.cached_body(url)
+            if cached is not None:
+                return json.loads(cached) if cached else None
         etag = None
-        if use_cache and path in self.cache:
-            etag = self.cache[path][0]
+        if use_cache:
+            ent = self._disk.get(url)
+            etag = ent.get("etag") if ent else None
         for attempt in range(retries + 1):
             self._wait_for_budget()
             try:
@@ -116,13 +157,15 @@ class RateLimitClient:
                     self.requests += 1
                     body = r.read().decode()
                     if use_cache:
-                        self.cache[path] = (r.headers.get("ETag"), body)
+                        self._disk[url] = {"body": body,
+                                           "etag": r.headers.get("ETag")}
+                        self._save()
                     return json.loads(body) if body else None
             except urllib.error.HTTPError as e:
                 self._update_limits(e.headers or {})
                 self.requests += 1
-                if e.code == 304 and path in self.cache:   # not modified
-                    return json.loads(self.cache[path][1])
+                if e.code == 304 and url in self._disk:   # not modified
+                    return json.loads(self._disk[url]["body"])
                 if e.code == 403:                          # rate limited / blocked
                     body = e.read().decode()[:200]
                     if "rate limit" in body.lower():
@@ -597,13 +640,22 @@ def main():
                     help="skip object-wise git compare (refs only)")
     ap.add_argument("--limit-prs", type=int, default=0, help="cap PRs checked (test)")
     ap.add_argument("--progress-every", type=int, default=100)
+    ap.add_argument("--cache", default=None,
+                    help="persist GH API responses to a JSON file and reuse them "
+                         "on re-runs (fast iteration; no network for cached URLs). "
+                         "Default: no persistent cache, live queries every run.")
+    ap.add_argument("--refresh", action="store_true",
+                    help="with --cache: revalidate cached URLs via ETag instead "
+                         "of serving them from disk (slower, fresh data)")
     args = ap.parse_args()
     if not args.pat:
         log("--pat or GH_PAT required"); return 2
 
     index, prs, branches, tags, rest = load_scrape(args.scrape)
     report = {"notes": [], "genuine": [], "deep": []}
-    client = RateLimitClient(args.pat)
+    client = RateLimitClient(args.pat, cache_path=args.cache, refresh=args.refresh)
+    if args.cache:
+        log(f"HTTP cache: {args.cache} (reuse={not args.refresh})")
     org_repo = f"{args.org}/{args.repo}"
     log(f"BB: {index['project']}/{index['repo']} ({len(prs)} PRs, "
         f"{len(branches)} branches, {len(tags)} tags)")
