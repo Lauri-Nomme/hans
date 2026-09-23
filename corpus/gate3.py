@@ -10,11 +10,13 @@ of the SAME Bitbucket repo, at production scale (10k+ PRs, 100k+ commits):
   PR layer   — paginated list compare (state via `merged_at`, title, head/base).
   deep layer — optional per-PR reviews + comments (rate-limit aware + resumable):
                reviewer sets/statuses, top-level comment bodies, and inline
-               (file-anchored) review threads. GH inline comments are fetched
-               ONCE repo-wide (/repos/{org}/{repo}/pulls/comments, ~total/100
-               requests) and bucketed by PR, instead of one request per PR;
-               missing threads are classified orphaned (expected GEI pruning)
-               vs NON-orphaned (real loss, gate-failing under --strict-inline).
+               (file-anchored) review threads. GH inline comments and issue
+               comments are fetched ONCE repo-wide (/repos/{org}/{repo}/
+               pulls/comments and /issues/comments, ~total/100 requests each)
+               and bucketed by PR, instead of one request per PR; only
+               /pulls/{n}/reviews stays per-PR. Missing threads are classified
+               orphaned (expected GEI pruning) vs NON-orphaned (real loss,
+               gate-failing under --strict-inline).
 
 Design for scale:
   - RateLimitClient: honors X-RateLimit-Remaining/Reset (sleeps), retries 429/5xx
@@ -671,8 +673,32 @@ def load_gh_review_comments(client, org_repo):
     return by_pr
 
 
+def load_gh_issue_comments(client, org_repo):
+    """All issue comments in the repo, grouped by issue/PR number.
+
+    One paginated pass over /repos/{org}/{repo}/issues/comments (~total/100
+    requests) instead of /issues/{n}/comments per PR. Each comment carries
+    `issue_url` (.../issues/<n>). Returns {number: [comment, ...]} (this
+    includes plain issues; only PR numbers are looked up)."""
+    by_n = {}
+    n = 0
+    for c in client.paginate(f"/repos/{org_repo}/issues/comments"):
+        n += 1
+        url = c.get("issue_url") or ""
+        try:
+            num = int(url.rstrip("/").rsplit("/", 1)[-1])
+        except (ValueError, AttributeError):
+            continue
+        by_n.setdefault(num, []).append(c)
+        if n % 5000 == 0:
+            log(f"issue comments: {n} fetched ({len(by_n)} issues so far)")
+    log(f"issue comments: {n} across {len(by_n)} issues (repo-wide)")
+    return by_n
+
+
 def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
-                   progress_every, rest, strict_inline=False, gh_inline_by_pr=None):
+                   progress_every, rest, strict_inline=False, gh_inline_by_pr=None,
+                   gh_issue_by_pr=None):
     """Per-PR reviews + comment body compare. Resumable via state file.
 
     Findings are appended to `<state>.deep.jsonl` per PR (one JSON object per
@@ -716,10 +742,15 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     if deepf is None and deep_path:
         deepf = open(deep_path, "a", encoding="utf-8")
     t0 = time.time()
+    last_t, last_i = t0, 0
     try:
         for i, n in enumerate(todo, 1):
             reviews = client.get(f"/repos/{org_repo}/pulls/{n}/reviews", {"per_page": 100}) or []
-            comments = client.get(f"/repos/{org_repo}/issues/{n}/comments", {"per_page": 100}) or []
+            if gh_issue_by_pr is not None:
+                comments = gh_issue_by_pr.get(n, [])
+            else:
+                comments = client.get(f"/repos/{org_repo}/issues/{n}/comments",
+                                      {"per_page": 100}) or []
             # -- reviewer comparison --
             # BB: all assigned reviewers (with their review status)
             # GH: all users who submitted a review (any state)
@@ -856,13 +887,14 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 json.dump({"schema": DEEP_SCHEMA, "deep_done": sorted(done)},
                           open(state_path, "w"))
             if i % progress_every == 0 or i == total:
-                el = time.time() - t0
-                rate = i / max(el, 0.001)
+                now = time.time()
+                rate = (i - last_i) / max(now - last_t, 0.001)   # recent window
                 eta = (total - i) / max(rate, 1e-9)
                 pct = 100.0 * i / total if total else 100.0
                 log(f"deep {i}/{total} ({pct:4.1f}%, {rate:,.1f}/s, "
                     f"ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d}) "
                     f"gh-budget-remaining={client.remaining}")
+                last_t, last_i = now, i
     finally:
         if deepf:
             deepf.close()
@@ -924,17 +956,24 @@ def main():
     verify_pr_list(prs, client, org_repo, report)
     if args.deep:
         log("phase: deep per-PR (reviews/comments)")
-        gh_inline_by_pr = None
+        gh_inline_by_pr = gh_issue_by_pr = None
         log("fetching repo-wide inline review comments (one paginated pass)")
         try:
             gh_inline_by_pr = load_gh_review_comments(client, org_repo)
         except Exception as e:
             log(f"repo-wide review comments failed ({e}); "
                 f"falling back to per-PR requests")
+        log("fetching repo-wide issue comments (one paginated pass)")
+        try:
+            gh_issue_by_pr = load_gh_issue_comments(client, org_repo)
+        except Exception as e:
+            log(f"repo-wide issue comments failed ({e}); "
+                f"falling back to per-PR requests")
         verify_pr_deep(prs, client, org_repo, report, args.state,
                        args.limit_prs, args.progress_every, rest,
                        strict_inline=args.strict_inline,
-                       gh_inline_by_pr=gh_inline_by_pr)
+                       gh_inline_by_pr=gh_inline_by_pr,
+                       gh_issue_by_pr=gh_issue_by_pr)
     else:
         log("skipping deep per-PR (no --deep)")
 
