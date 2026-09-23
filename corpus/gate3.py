@@ -475,17 +475,14 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     pr_by_id = {p["id"]: p for p in prs}
 
     def _norm_login(login):
-        """Normalize EMU logins: strip __mannequin-style suffix, or an
-        underscore suffix that looks machine-generated (short + contains a
-        digit) so natural logins like 'jane_dev' or 'bob_2f' are NOT mangled.
-
-        Only the '__' split is unconditional (documented EMU mannequin form);
-        the '_' suffix fallback requires a digit to avoid mislabeling real
-        users as mannequins."""
+        """Normalize EMU logins: strip __mannequin-style suffix, or a short
+        underscore suffix (org/machine tag, e.g. '<user>_dtrnd'). The user is
+        identified by the part before the tag; this matches how GEI maps EMU
+        (Enterprise Managed User) logins back to their source identity."""
         if "__" in login:
             return login.split("__")[0]
         parts = login.rsplit("_", 1)
-        if len(parts) == 2 and len(parts[1]) <= 6 and any(c.isdigit() for c in parts[1]):
+        if len(parts) == 2 and len(parts[1]) <= 6:
             return parts[0]
         return login
 
