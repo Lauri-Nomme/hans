@@ -8,7 +8,10 @@ of the SAME Bitbucket repo, at production scale (10k+ PRs, 100k+ commits):
                git mirror (`<scrape>/git`) via `git for-each-ref`; optionally
                object-wise compare via `git cat-file --batch-all-objects`.
   PR layer   — paginated list compare (state via `merged_at`, title, head/base).
-  deep layer — optional per-PR reviews/comments, rate-limit aware + resumable.
+  deep layer — optional per-PR reviews + comments (rate-limit aware + resumable):
+               reviewer sets/statuses, top-level comment bodies, and inline
+               (file-anchored) review threads vs GH /pulls/{n}/comments, with
+               orphaned-vs-non-orphaned classification of missing threads.
 
 Design for scale:
   - RateLimitClient: honors X-RateLimit-Remaining/Reset (sleeps), retries 429/5xx
@@ -487,6 +490,50 @@ def bb_top_comments(rest, pid):
     return bodies
 
 
+def bb_inline_comments(rest, pid):
+    """All inline (file-anchored) review comments on a PR from the scrape
+    activities, flattened root-first.
+
+    A comment is inline when its record carries an `anchor` with a `path`
+    (fromHash/toHash + path + line). Replies are nested under the thread root
+    and inherit its anchor and `orphaned` flag (in the BB API only the root
+    carries the anchor). Returns a list of dicts:
+      {id, text(norm), path, line, orphaned, author, createdDate, depth, root}
+    """
+    p = rest / f"pr_{pid}_activities.json"
+    if not p.exists():
+        return []
+    acts = json.loads(p.read_text())
+    out = []
+
+    def walk(c, depth, orphaned):
+        a = c.get("anchor") or {}
+        root = depth == 0
+        if root and not a.get("path"):
+            return                    # top-level PR comment, not inline
+        if root:
+            orphaned = bool(a.get("orphaned"))
+        out.append({
+            "id": c.get("id"),
+            "text": norm_comment(c.get("text")),
+            "path": a.get("path"),
+            "line": a.get("line"),
+            "orphaned": orphaned,
+            "author": (c.get("author") or {}).get("slug"),
+            "createdDate": c.get("createdDate"),
+            "depth": depth,
+            "root": root,
+        })
+        for r in c.get("comments") or []:
+            walk(r, depth + 1, orphaned)
+
+    for a in acts:
+        if a.get("action") != "COMMENTED":
+            continue
+        walk(a.get("comment") or {}, 0, False)
+    return out
+
+
 def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                    progress_every, rest):
     """Per-PR reviews + comment body compare. Resumable via state file.
@@ -599,6 +646,38 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 for m in missing[:5]:
                     report["notes"].append(f"   missing: {m!r}")
 
+            # inline (file-anchored) review threads: BB anchored comments
+            # (/pr_<n>_activities anchor.path) vs GH review comments
+            # (/pulls/{n}/comments). GEI prunes threads whose BB anchor is
+            # orphaned (old diff revision, no longer matches the final diff →
+            # REVIEW_THREAD_MISSING family), so orphaned-root losses are the
+            # expected bucket; NON-orphaned losses are the real signal.
+            bb_inline = bb_inline_comments(rest, n)
+            gh_inline = list(client.paginate(
+                f"/repos/{org_repo}/pulls/{n}/comments")) or []
+            gh_inline_bodies = [norm_comment(c.get("body")) for c in gh_inline]
+            gh_roots = [c for c in gh_inline if c.get("in_reply_to_id") is None]
+            gh_unanchored = sum(
+                1 for c in gh_roots
+                if c.get("line") is None and c.get("position") is None
+                and c.get("original_line") is None)
+            bb_roots = [b for b in bb_inline if b["root"]]
+            bb_orphaned_roots = [b for b in bb_roots if b["orphaned"]]
+            mis = [b for b in bb_inline
+                   if not any(b["text"] in g or g in b["text"]
+                              for g in gh_inline_bodies)]
+            mis_orph = [b for b in mis if b["orphaned"]]
+            mis_non = [b for b in mis if not b["orphaned"]]
+            if mis:
+                line = (f"PR {n}: {len(mis)}/{len(bb_inline)} inline comment(s) "
+                        f"missing on GH "
+                        f"({len(mis_orph)} under orphaned roots — expected; "
+                        f"{len(mis_non)} NON-orphaned)")
+                if mis_non:
+                    line += (f" e.g. {mis_non[0]['text'][:80]!r} "
+                             f"path={mis_non[0]['path']}")
+                report["notes"].append(line)
+
             rec = {
                 "pr": n,
                 "bb_reviewers": bb_rev,
@@ -609,6 +688,15 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 "gh_comment_count": len(comments),
                 "gh_comment_missing": len(missing),
                 "gh_review_count": len(reviews),
+                "bb_inline_threads": len(bb_roots),
+                "bb_orphaned_threads": len(bb_orphaned_roots),
+                "bb_inline_comments": len(bb_inline),
+                "gh_inline_threads": len(gh_roots),
+                "gh_unanchored_threads": gh_unanchored,
+                "gh_inline_comments": len(gh_inline),
+                "bb_inline_missing": len(mis),
+                "bb_inline_missing_orphaned": len(mis_orph),
+                "bb_inline_missing_nonorphaned": len(mis_non),
             }
             report["deep"].append(rec)
             if deepf:
@@ -690,6 +778,14 @@ def main():
     if len(report["deep"]) > 50:
         log(f"  ... {len(report['deep'])} deep records (first 50 shown; "
             f"state saved for resume)")
+    deep = report["deep"]
+    if deep:
+        tally = {k: sum(d.get(k, 0) for d in deep) for k in (
+            "bb_inline_threads", "bb_orphaned_threads", "bb_inline_comments",
+            "gh_inline_threads", "gh_unanchored_threads", "gh_inline_comments",
+            "bb_inline_missing", "bb_inline_missing_orphaned",
+            "bb_inline_missing_nonorphaned")}
+        log("[inline-tally] " + json.dumps(tally))
     if report["genuine"]:
         log(f"  GENUINE ({len(report['genuine'])}):")
         for g in report["genuine"][:50]:
