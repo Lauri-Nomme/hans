@@ -66,6 +66,68 @@ def norm_comment(text):
     return re.sub(r"\s+", " ", " ".join(lines)).strip()
 
 
+def _norm_login(login):
+    """Normalize EMU logins: strip __mannequin-style suffix, or a short
+    underscore suffix (org/machine tag, e.g. '<user>_dtrnd'). The user is
+    identified by the part before the tag; this matches how GEI maps EMU
+    (Enterprise Managed User) logins back to their source identity."""
+    if "__" in login:
+        return login.split("__")[0]
+    parts = login.rsplit("_", 1)
+    if len(parts) == 2 and len(parts[1]) <= 6:
+        return parts[0]
+    return login
+
+
+_STATE_RANK = {"APPROVED": 3, "CHANGES_REQUESTED": 2,
+               "COMMENTED": 1, "DISMISSED": 0, "PENDING": 0}
+_BB_TO_GH = {"APPROVED": "APPROVED", "NEEDS_WORK": "CHANGES_REQUESTED"}
+
+
+def _replay_findings(rec, strict_inline, report):
+    """Re-derive a persisted deep record's summary notes (and strict-inline
+    genuine findings) into `report`, so a RESUMED run's PASS/FAIL decision and
+    note list include PRs that finished in an earlier session. Without this,
+    only counts survive a cancel (deep.jsonl) while notes/genuine — computed
+    in-memory per PR — are lost, and the gate could wrongly report PASS.
+
+    Mirrors the live note generation in verify_pr_deep; keep the two in sync."""
+    n = rec.get("pr")
+    bb_set = set(rec.get("bb_reviewers") or [])
+    gh_norm = {_norm_login(x) for x in (rec.get("gh_reviewers") or [])}
+    bb_status = rec.get("bb_reviewer_statuses") or {}
+    gh_best = rec.get("gh_reviewer_best_state") or {}
+    only_bb = sorted(bb_set - gh_norm)
+    only_gh = sorted(gh_norm - bb_set)
+    if only_bb or only_gh:
+        parts = []
+        if only_bb:
+            parts.append("only-BB: " + ", ".join(
+                f"{u}({bb_status.get(u, '?')})" for u in only_bb))
+        if only_gh:
+            parts.append(f"only-GH: {only_gh}")
+        report["notes"].append(f"PR {n}: reviewer set differs — {'; '.join(parts)}")
+    for u in sorted(bb_set & gh_norm):
+        expected_gh = _BB_TO_GH.get(bb_status.get(u))
+        if expected_gh and gh_best.get(u) != expected_gh:
+            report["notes"].append(
+                f"PR {n}: reviewer {u} status mismatch "
+                f"BB={bb_status[u]} GH={gh_best.get(u, 'NONE')}")
+    if rec.get("gh_comment_missing"):
+        report["notes"].append(
+            f"PR {n}: {rec['gh_comment_missing']} BB comment(s) not found on GH")
+    if rec.get("bb_inline_missing"):
+        report["notes"].append(
+            f"PR {n}: {rec['bb_inline_missing']}/{rec.get('bb_inline_comments', 0)} "
+            f"inline comment(s) missing on GH "
+            f"({rec.get('bb_inline_missing_orphaned', 0)} under orphaned roots — "
+            f"expected; {rec.get('bb_inline_missing_nonorphaned', 0)} NON-orphaned)")
+    if strict_inline and rec.get("bb_inline_missing_nonorphaned"):
+        report["genuine"].append(
+            f"PR {n}: {rec['bb_inline_missing_nonorphaned']} NON-orphaned inline "
+            f"comment(s) missing on GH (strict-inline)")
+
+
 class RateLimitClient:
     """urllib wrapper: rate-limit aware, retry with backoff, persistent cache, paginate.
 
@@ -541,7 +603,9 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     Findings are appended to `<state>.deep.jsonl` per PR (one JSON object per
     line), so a partial/crashed run keeps the mismatches it already found even
     though the final summary only prints at completion. On resume, prior
-    records are loaded so the in-memory report stays complete."""
+    records are loaded AND their notes/genuine findings re-derived
+    (_replay_findings), so a cancel/restart preserves the PASS/FAIL decision —
+    not just the counts."""
     DEEP_SCHEMA = 2   # bump when the per-PR record shape changes
     done = set()
     if state_path and os.path.exists(state_path):
@@ -564,28 +628,15 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                     rec = json.loads(line)
                     if rec.get("schema") == DEEP_SCHEMA:
                         report["deep"].append(rec)
+                        # restore notes/genuine for PRs finished in an earlier
+                        # session, so the resumed run's PASS/FAIL is complete
+                        _replay_findings(rec, strict_inline, report)
         except Exception:
             pass
     todo = sorted(p["id"] for p in prs)[:limit_prs] if limit_prs else sorted(p["id"] for p in prs)
     todo = [n for n in todo if n not in done]
     total = len(todo)
     pr_by_id = {p["id"]: p for p in prs}
-
-    def _norm_login(login):
-        """Normalize EMU logins: strip __mannequin-style suffix, or a short
-        underscore suffix (org/machine tag, e.g. '<user>_dtrnd'). The user is
-        identified by the part before the tag; this matches how GEI maps EMU
-        (Enterprise Managed User) logins back to their source identity."""
-        if "__" in login:
-            return login.split("__")[0]
-        parts = login.rsplit("_", 1)
-        if len(parts) == 2 and len(parts[1]) <= 6:
-            return parts[0]
-        return login
-
-    _STATE_RANK = {"APPROVED": 3, "CHANGES_REQUESTED": 2,
-                   "COMMENTED": 1, "DISMISSED": 0, "PENDING": 0}
-    _BB_TO_GH = {"APPROVED": "APPROVED", "NEEDS_WORK": "CHANGES_REQUESTED"}
 
     if deepf is None and deep_path:
         deepf = open(deep_path, "a", encoding="utf-8")
