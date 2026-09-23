@@ -12,6 +12,9 @@ of the SAME Bitbucket repo, at production scale (10k+ PRs, 100k+ commits):
                reviewer sets/statuses, top-level comment bodies, and inline
                (file-anchored) review threads vs GH /pulls/{n}/comments, with
                orphaned-vs-non-orphaned classification of missing threads.
+               The inline GH call is skipped when the scrape has no anchored
+               comments for that PR (GEI imports nothing BB lacked), saving a
+               request per inline-comment-free PR.
 
 Design for scale:
   - RateLimitClient: honors X-RateLimit-Remaining/Reset (sleeps), retries 429/5xx
@@ -576,14 +579,21 @@ def verify_pr_list(prs, client, org_repo, report):
     report["notes"].append("PR list compare done")
 
 
-def bb_top_comments(rest, pid):
-    """Top-level PR comments from the scrape activities (COMMENT:ADDED with a
-    comment that has no anchor/path → pure PR comment). Returns list of
-    normalized bodies in creation order."""
+def load_activities(rest, pid):
+    """Parsed PR activities from the scrape, or [] if absent/unreadable."""
     p = rest / f"pr_{pid}_activities.json"
     if not p.exists():
         return []
-    acts = json.loads(p.read_text())
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return []
+
+
+def bb_top_comments(acts):
+    """Top-level PR comments from the scrape activities (COMMENTED with a
+    comment that has no anchor/path → pure PR comment). Returns list of
+    normalized bodies in creation order."""
     bodies = []
     for a in acts:
         if a.get("action") != "COMMENTED":
@@ -597,7 +607,7 @@ def bb_top_comments(rest, pid):
     return bodies
 
 
-def bb_inline_comments(rest, pid):
+def bb_inline_comments(acts):
     """All inline (file-anchored) review comments on a PR from the scrape
     activities, flattened root-first.
 
@@ -607,10 +617,6 @@ def bb_inline_comments(rest, pid):
     carries the anchor). Returns a list of dicts:
       {id, text(norm), path, line, orphaned, author, createdDate, depth, root}
     """
-    p = rest / f"pr_{pid}_activities.json"
-    if not p.exists():
-        return []
-    acts = json.loads(p.read_text())
     out = []
 
     def walk(c, depth, orphaned):
@@ -739,7 +745,8 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
 
             # comment bodies: every BB top-level PR comment should appear (normalized)
             # in some GH issue comment (GH flattens threads + applies markdown).
-            bb_bodies = bb_top_comments(rest, n)
+            acts = load_activities(rest, n)
+            bb_bodies = bb_top_comments(acts)
             gh_bodies = [norm_comment(c.get("body")) for c in comments]
             missing = []
             for b in bb_bodies:
@@ -756,9 +763,20 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
             # orphaned (old diff revision, no longer matches the final diff →
             # REVIEW_THREAD_MISSING family), so orphaned-root losses are the
             # expected bucket; NON-orphaned losses are the real signal.
-            bb_inline = bb_inline_comments(rest, n)
-            gh_inline = list(client.paginate(
-                f"/repos/{org_repo}/pulls/{n}/comments")) or []
+            #
+            # Request skip: GEI only imports what BB had, so a PR with no
+            # anchored comments in the scrape cannot have inline comments on
+            # GH — don't spend a request on it. (Blind spot: a spurious
+            # GH-only inline comment on such a PR goes unnoticed; gate3 only
+            # flags BB→GH loss, not GH extras.)
+            bb_inline = bb_inline_comments(acts)
+            if bb_inline:
+                gh_inline = list(client.paginate(
+                    f"/repos/{org_repo}/pulls/{n}/comments")) or []
+                gh_inline_skipped = False
+            else:
+                gh_inline = []
+                gh_inline_skipped = True
             gh_inline_bodies = [norm_comment(c.get("body")) for c in gh_inline]
             gh_roots = [c for c in gh_inline if c.get("in_reply_to_id") is None]
             gh_unanchored = sum(
@@ -804,6 +822,7 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 "gh_inline_threads": len(gh_roots),
                 "gh_unanchored_threads": gh_unanchored,
                 "gh_inline_comments": len(gh_inline),
+                "gh_inline_skipped": gh_inline_skipped,
                 "bb_inline_missing": len(mis),
                 "bb_inline_missing_orphaned": len(mis_orph),
                 "bb_inline_missing_nonorphaned": len(mis_non),
@@ -905,6 +924,7 @@ def main():
         tally = {k: sum(d.get(k, 0) for d in deep) for k in (
             "bb_inline_threads", "bb_orphaned_threads", "bb_inline_comments",
             "gh_inline_threads", "gh_unanchored_threads", "gh_inline_comments",
+            "gh_inline_skipped",
             "bb_inline_missing", "bb_inline_missing_orphaned",
             "bb_inline_missing_nonorphaned")}
         log("[inline-tally] " + json.dumps(tally))
