@@ -542,21 +542,28 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     line), so a partial/crashed run keeps the mismatches it already found even
     though the final summary only prints at completion. On resume, prior
     records are loaded so the in-memory report stays complete."""
+    DEEP_SCHEMA = 2   # bump when the per-PR record shape changes
     done = set()
     if state_path and os.path.exists(state_path):
         try:
-            done = set(json.loads(open(state_path).read()).get("deep_done", []))
+            st = json.loads(open(state_path).read())
+            if st.get("schema") == DEEP_SCHEMA:
+                done = set(st.get("deep_done", []))
         except Exception:
             pass
     deep_path = (state_path + ".deep.jsonl") if state_path else None
     deepf = None
     if deep_path and os.path.exists(deep_path):
-        # seed in-memory report from prior partial runs so the summary is complete
+        # seed in-memory report from prior partial runs so the summary is
+        # complete — but only records matching the current schema (older deep
+        # runs lack the inline fields and would skew the tally / double-count).
         try:
             for line in open(deep_path, encoding="utf-8"):
                 line = line.strip()
                 if line:
-                    report["deep"].append(json.loads(line))
+                    rec = json.loads(line)
+                    if rec.get("schema") == DEEP_SCHEMA:
+                        report["deep"].append(rec)
         except Exception:
             pass
     todo = sorted(p["id"] for p in prs)[:limit_prs] if limit_prs else sorted(p["id"] for p in prs)
@@ -679,6 +686,7 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 report["notes"].append(line)
 
             rec = {
+                "schema": DEEP_SCHEMA,
                 "pr": n,
                 "bb_reviewers": bb_rev,
                 "bb_reviewer_statuses": bb_status,
@@ -704,7 +712,7 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 deepf.flush()
             done.add(n)
             if state_path:
-                json.dump({"deep_done": sorted(done)},
+                json.dump({"schema": DEEP_SCHEMA, "deep_done": sorted(done)},
                           open(state_path, "w"))
             if i % progress_every == 0 or i == total:
                 pct = 100.0 * i / total if total else 100.0
