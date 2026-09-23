@@ -29,7 +29,7 @@ Design for scale:
 Usage:
   python3 corpus/gate3.py --scrape ./scrape/FIX-golden --org ORG --repo REPO \
       --pat ghp_... [--no-git-objects] [--deep] [--state gate3-state.json] \
-      [--cache gh-cache.json] [--refresh]
+      [--cache gh-cache.json] [--refresh] [--strict-inline]
 """
 import argparse
 import json
@@ -535,7 +535,7 @@ def bb_inline_comments(rest, pid):
 
 
 def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
-                   progress_every, rest):
+                   progress_every, rest, strict_inline=False):
     """Per-PR reviews + comment body compare. Resumable via state file.
 
     Findings are appended to `<state>.deep.jsonl` per PR (one JSON object per
@@ -684,6 +684,11 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                     line += (f" e.g. {mis_non[0]['text'][:80]!r} "
                              f"path={mis_non[0]['path']}")
                 report["notes"].append(line)
+            if strict_inline and mis_non:
+                report["genuine"].append(
+                    f"PR {n}: {len(mis_non)} NON-orphaned inline comment(s) "
+                    f"missing on GH (strict-inline) — first: "
+                    f"{mis_non[0]['text'][:80]!r} path={mis_non[0]['path']}")
 
             rec = {
                 "schema": DEEP_SCHEMA,
@@ -743,6 +748,11 @@ def main():
     ap.add_argument("--refresh", action="store_true",
                     help="with --cache: revalidate cached URLs via ETag instead "
                          "of serving them from disk (slower, fresh data)")
+    ap.add_argument("--strict-inline", action="store_true",
+                    help="deep: treat NON-orphaned inline (file-anchored) review "
+                         "comments missing on GH as a genuine (gate-failing) "
+                         "finding instead of an advisory note. Orphaned-root "
+                         "losses (GEI's known pruning bucket) stay advisory.")
     args = ap.parse_args()
     if not args.pat:
         log("--pat or GH_PAT required"); return 2
@@ -773,7 +783,8 @@ def main():
     if args.deep:
         log("phase: deep per-PR (reviews/comments)")
         verify_pr_deep(prs, client, org_repo, report, args.state,
-                       args.limit_prs, args.progress_every, rest)
+                       args.limit_prs, args.progress_every, rest,
+                       strict_inline=args.strict_inline)
     else:
         log("skipping deep per-PR (no --deep)")
 
