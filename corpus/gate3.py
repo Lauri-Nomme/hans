@@ -232,7 +232,16 @@ def verify_git_refs(scrape_git, org_repo, client, report):
 
 def verify_git_objects(scrape_git, org_repo, client, report):
     """Object-wise compare: fetch GH objects into a temp bare repo, then compare
-    `git cat-file --batch-all-objects` output (sha -> type + content hash)."""
+    `git cat-file --batch-all-objects` output (sha -> type + content hash).
+
+    only-BB objects are classified by reachability in the BB mirror:
+      - reachable from a branch/tag ref  -> SHOULD be on GH; genuine if absent
+      - reachable only via retention refs (refs/keep/*, refs/stash-refs/*,
+        refs/pull-requests/*) -> GEI deliberately prunes these (intermediate PR
+        commits, orphaned anchors); advisory, expected
+      - not reachable from any ref       -> dangling in the odb; genuine
+    Classification only runs when there are only-BB objects, so the common
+    pass path pays only the one cat-file per side."""
     import tempfile
     import shutil
     tmp = tempfile.mkdtemp(prefix="gate3-obj-")
@@ -257,28 +266,83 @@ def verify_git_objects(scrape_git, org_repo, client, report):
             r = subprocess.run(["git", "-C", gd, "cat-file", "--batch-all-objects",
                                 "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
                                capture_output=True, text=True, timeout=3600)
-            m = {}
-            for line in r.stdout.splitlines():
-                sha, typ, size = line.split(" ")
-                m[sha] = typ
-            return m
+            return {line.split()[0] for line in r.stdout.splitlines()}
 
         la = objmap(scrape_git, "BB")
         lb = objmap(tmp, "GH")
         log("git objects: comparing")
-        only_a = set(la) - set(lb)
-        only_b = set(lb) - set(la)
-        same = set(la) & set(lb)
+        only_a = la - lb
+        only_b = lb - la
+        same = la & lb
+        log(f"git objects: BB={len(la)} GH={len(lb)} shared={len(same)} "
+            f"only-BB={len(only_a)} only-GH={len(only_b)}")
         report["notes"].append(f"git objects: BB={len(la)} GH={len(lb)} "
                                f"shared={len(same)} only-BB={len(only_a)} only-GH={len(only_b)}")
-        if only_a or only_b:
+
+        if only_b:
             report["genuine"].append(
-                f"git object sets differ: only-BB {sorted(only_a)[:5]} "
-                f"only-GH {sorted(only_b)[:5]}")
-            return False
-        return True
+                f"git object sets differ: only-GH {sorted(only_b)[:5]} (on GH, "
+                f"not in archive — true loss)")
+        should_be_gh = set()
+        dangling = set()
+        if only_a:
+            # classify only-BB by reachability (only when needed)
+            reach_migrated = _reachable_from(scrape_git, "refs/heads", "refs/tags")
+            reach_all = _reachable_all(scrape_git)
+            should_be_gh = only_a & reach_migrated
+            dangling = only_a - reach_all
+            expected_pruned = only_a - should_be_gh - dangling
+            log(f"git objects: only-BB breakdown migrated-missing={len(should_be_gh)} "
+                f"pruned-retained={len(expected_pruned)} dangling={len(dangling)}")
+            report["notes"].append(
+                f"git objects: only-BB = {len(only_a)} "
+                f"(reachable-from-refs-should-be-on-GH {len(should_be_gh)}, "
+                f"GEI-pruned-intermediate {len(expected_pruned)}, dangling {len(dangling)})")
+            if should_be_gh:
+                report["genuine"].append(
+                    f"git object sets differ: {len(should_be_gh)} only-BB object(s) "
+                    f"reachable from a branch/tag ref but missing on GH "
+                    f"(sample {sorted(should_be_gh)[:5]})")
+            if dangling:
+                report["genuine"].append(
+                    f"git object sets differ: {len(dangling)} only-BB object(s) "
+                    f"not reachable from any ref (sample {sorted(dangling)[:5]})")
+        good = not only_b and not should_be_gh and not dangling
+        return good
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _reachable_tips(gitdir, *refspecs):
+    """Objectnames of every object reachable from the given ref namespaces."""
+    out = subprocess.run(
+        ["git", "-C", gitdir, "for-each-ref", "--format=%(objectname)",
+         *refspecs],
+        capture_output=True, text=True)
+    tips = out.stdout.split()
+    if not tips:
+        return set()
+    r = subprocess.run(["git", "-C", gitdir, "rev-list", "--objects", "--stdin"],
+                       input="\n".join(tips), capture_output=True, text=True)
+    return {line.split()[0] for line in r.stdout.splitlines()}
+
+
+def _reachable_from(gitdir, *refspecs):
+    """Objectnames reachable from branch/tag refs (shallow-first optimization:
+    rev-list streams in one pass, no per-ref subprocess)."""
+    # Equivalent to `git rev-list --objects <tips>` via one rev-list --stdin.
+    return _reachable_tips(gitdir, *refspecs)
+
+
+def _reachable_all(gitdir):
+    """Objectnames reachable from ALL refs (incl. refs/keep, stash-refs,
+    pull-requests)."""
+    return _reachable_tips(gitdir, "refs") if _has_refs(gitdir) else set()
+
+
+def _has_refs(gitdir):
+    return subprocess.run(["git", "-C", gitdir, "for-each-ref", "--count"],
+                          capture_output=True, text=True).stdout.strip() != "0"
 
 
 # --------------------------------------------------------------------------
