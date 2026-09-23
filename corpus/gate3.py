@@ -10,11 +10,11 @@ of the SAME Bitbucket repo, at production scale (10k+ PRs, 100k+ commits):
   PR layer   — paginated list compare (state via `merged_at`, title, head/base).
   deep layer — optional per-PR reviews + comments (rate-limit aware + resumable):
                reviewer sets/statuses, top-level comment bodies, and inline
-               (file-anchored) review threads vs GH /pulls/{n}/comments, with
-               orphaned-vs-non-orphaned classification of missing threads.
-               The inline GH call is skipped when the scrape has no anchored
-               comments for that PR (GEI imports nothing BB lacked), saving a
-               request per inline-comment-free PR.
+               (file-anchored) review threads. GH inline comments are fetched
+               ONCE repo-wide (/repos/{org}/{repo}/pulls/comments, ~total/100
+               requests) and bucketed by PR, instead of one request per PR;
+               missing threads are classified orphaned (expected GEI pruning)
+               vs NON-orphaned (real loss, gate-failing under --strict-inline).
 
 Design for scale:
   - RateLimitClient: honors X-RateLimit-Remaining/Reset (sleeps), retries 429/5xx
@@ -647,8 +647,32 @@ def bb_inline_comments(acts):
     return out
 
 
+def load_gh_review_comments(client, org_repo):
+    """All inline review comments in the repo, grouped by PR number.
+
+    One paginated pass over /repos/{org}/{repo}/pulls/comments (~total/100
+    requests) instead of one request per PR. Each review comment carries
+    `pull_request_url` (.../pulls/<n>), which we parse to bucket it. Returns
+    {pr_number: [comment, ...]} (PRs with no inline comments are simply
+    absent)."""
+    by_pr = {}
+    n = 0
+    for c in client.paginate(f"/repos/{org_repo}/pulls/comments"):
+        n += 1
+        url = c.get("pull_request_url") or ""
+        try:
+            pr = int(url.rstrip("/").rsplit("/", 1)[-1])
+        except (ValueError, AttributeError):
+            continue
+        by_pr.setdefault(pr, []).append(c)
+        if n % 5000 == 0:
+            log(f"review comments: {n} fetched ({len(by_pr)} PRs so far)")
+    log(f"review comments: {n} across {len(by_pr)} PRs (repo-wide)")
+    return by_pr
+
+
 def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
-                   progress_every, rest, strict_inline=False):
+                   progress_every, rest, strict_inline=False, gh_inline_by_pr=None):
     """Per-PR reviews + comment body compare. Resumable via state file.
 
     Findings are appended to `<state>.deep.jsonl` per PR (one JSON object per
@@ -657,7 +681,7 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     records are loaded AND their notes/genuine findings re-derived
     (_replay_findings), so a cancel/restart preserves the PASS/FAIL decision —
     not just the counts."""
-    DEEP_SCHEMA = 2   # bump when the per-PR record shape changes
+    DEEP_SCHEMA = 3   # bump when the per-PR record shape changes
     done = set()
     if state_path and os.path.exists(state_path):
         try:
@@ -758,25 +782,22 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                     report["notes"].append(f"   missing: {m!r}")
 
             # inline (file-anchored) review threads: BB anchored comments
-            # (/pr_<n>_activities anchor.path) vs GH review comments
-            # (/pulls/{n}/comments). GEI prunes threads whose BB anchor is
-            # orphaned (old diff revision, no longer matches the final diff →
-            # REVIEW_THREAD_MISSING family), so orphaned-root losses are the
-            # expected bucket; NON-orphaned losses are the real signal.
-            #
-            # Request skip: GEI only imports what BB had, so a PR with no
-            # anchored comments in the scrape cannot have inline comments on
-            # GH — don't spend a request on it. (Blind spot: a spurious
-            # GH-only inline comment on such a PR goes unnoticed; gate3 only
-            # flags BB→GH loss, not GH extras.)
+            # (/pr_<n>_activities anchor.path) vs GH review comments. GH side
+            # comes from the repo-wide map (load_gh_review_comments) fetched
+            # once; fall back to a per-PR request only if the map is absent
+            # (and only when the scrape actually has inline comments).
+            # GEI prunes threads whose BB anchor is orphaned (old diff revision,
+            # no longer matches the final diff → REVIEW_THREAD_MISSING family),
+            # so orphaned-root losses are the expected bucket; NON-orphaned
+            # losses are the real signal.
             bb_inline = bb_inline_comments(acts)
-            if bb_inline:
+            if gh_inline_by_pr is not None:
+                gh_inline = gh_inline_by_pr.get(n, [])
+            elif bb_inline:
                 gh_inline = list(client.paginate(
                     f"/repos/{org_repo}/pulls/{n}/comments")) or []
-                gh_inline_skipped = False
             else:
                 gh_inline = []
-                gh_inline_skipped = True
             gh_inline_bodies = [norm_comment(c.get("body")) for c in gh_inline]
             gh_roots = [c for c in gh_inline if c.get("in_reply_to_id") is None]
             gh_unanchored = sum(
@@ -822,7 +843,6 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 "gh_inline_threads": len(gh_roots),
                 "gh_unanchored_threads": gh_unanchored,
                 "gh_inline_comments": len(gh_inline),
-                "gh_inline_skipped": gh_inline_skipped,
                 "bb_inline_missing": len(mis),
                 "bb_inline_missing_orphaned": len(mis_orph),
                 "bb_inline_missing_nonorphaned": len(mis_non),
@@ -904,9 +924,17 @@ def main():
     verify_pr_list(prs, client, org_repo, report)
     if args.deep:
         log("phase: deep per-PR (reviews/comments)")
+        gh_inline_by_pr = None
+        log("fetching repo-wide inline review comments (one paginated pass)")
+        try:
+            gh_inline_by_pr = load_gh_review_comments(client, org_repo)
+        except Exception as e:
+            log(f"repo-wide review comments failed ({e}); "
+                f"falling back to per-PR requests")
         verify_pr_deep(prs, client, org_repo, report, args.state,
                        args.limit_prs, args.progress_every, rest,
-                       strict_inline=args.strict_inline)
+                       strict_inline=args.strict_inline,
+                       gh_inline_by_pr=gh_inline_by_pr)
     else:
         log("skipping deep per-PR (no --deep)")
 
@@ -924,7 +952,6 @@ def main():
         tally = {k: sum(d.get(k, 0) for d in deep) for k in (
             "bb_inline_threads", "bb_orphaned_threads", "bb_inline_comments",
             "gh_inline_threads", "gh_unanchored_threads", "gh_inline_comments",
-            "gh_inline_skipped",
             "bb_inline_missing", "bb_inline_missing_orphaned",
             "bb_inline_missing_nonorphaned")}
         log("[inline-tally] " + json.dumps(tally))
