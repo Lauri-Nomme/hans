@@ -685,6 +685,7 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
 
     if deepf is None and deep_path:
         deepf = open(deep_path, "a", encoding="utf-8")
+    t0 = time.time()
     try:
         for i, n in enumerate(todo, 1):
             reviews = client.get(f"/repos/{org_repo}/pulls/{n}/reviews", {"per_page": 100}) or []
@@ -816,8 +817,13 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 json.dump({"schema": DEEP_SCHEMA, "deep_done": sorted(done)},
                           open(state_path, "w"))
             if i % progress_every == 0 or i == total:
+                el = time.time() - t0
+                rate = i / max(el, 0.001)
+                eta = (total - i) / max(rate, 1e-9)
                 pct = 100.0 * i / total if total else 100.0
-                log(f"deep {i}/{total} ({pct:.0f}%) remaining={client.remaining}")
+                log(f"deep {i}/{total} ({pct:4.1f}%, {rate:,.1f}/s, "
+                    f"ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d}) "
+                    f"remaining={client.remaining}")
     finally:
         if deepf:
             deepf.close()
