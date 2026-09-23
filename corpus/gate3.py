@@ -473,26 +473,70 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     todo = [n for n in todo if n not in done]
     total = len(todo)
     pr_by_id = {p["id"]: p for p in prs}
+
+    def _norm_login(login):
+        """Normalize EMU logins: strip __mannequin or _org suffix."""
+        if "__" in login:
+            return login.split("__")[0]
+        parts = login.rsplit("_", 1)
+        if len(parts) == 2 and len(parts[1]) <= 6:
+            return parts[0]
+        return login
+
+    _STATE_RANK = {"APPROVED": 3, "CHANGES_REQUESTED": 2,
+                   "COMMENTED": 1, "DISMISSED": 0, "PENDING": 0}
+    _BB_TO_GH = {"APPROVED": "APPROVED", "NEEDS_WORK": "CHANGES_REQUESTED"}
+
     if deepf is None and deep_path:
         deepf = open(deep_path, "a", encoding="utf-8")
     try:
         for i, n in enumerate(todo, 1):
             reviews = client.get(f"/repos/{org_repo}/pulls/{n}/reviews", {"per_page": 100}) or []
             comments = client.get(f"/repos/{org_repo}/issues/{n}/comments", {"per_page": 100}) or []
-            # reviewers expected from BB scrape
+            # -- reviewer comparison --
+            # BB: all assigned reviewers (with their review status)
+            # GH: all users who submitted a review (any state)
             bb = pr_by_id.get(n, {})
+            bb_reviewers_raw = bb.get("reviewers") or []
             bb_rev = sorted(r.get("user", {}).get("slug") or r.get("user", {}).get("name")
-                            for r in (bb.get("reviewers") or []))
-            gh_rev = sorted({r.get("user", {}).get("login") for r in reviews
-                             if r.get("state") in ("APPROVED", "CHANGES_REQUESTED")})
-            # Reviewers on GH are mapped by email; mannequins adopt hashed logins,
-            # so mismatches are advisory, not hard failures. Compare as sets.
+                            for r in bb_reviewers_raw)
+            bb_status = {(r.get("user", {}).get("slug") or r.get("user", {}).get("name")):
+                         r.get("status", "UNKNOWN") for r in bb_reviewers_raw}
+
+            gh_rev_all = sorted({(r.get("user") or {}).get("login")
+                                 for r in reviews
+                                 if (r.get("user") or {}).get("login")} - {None})
+            gh_rev_norm = sorted({_norm_login(x) for x in gh_rev_all})
+
+            gh_best = {}
+            for r in reviews:
+                login = (r.get("user") or {}).get("login")
+                if not login:
+                    continue
+                norm = _norm_login(login)
+                st = r.get("state", "")
+                if _STATE_RANK.get(st, 0) > _STATE_RANK.get(gh_best.get(norm, ""), 0):
+                    gh_best[norm] = st
+
             bb_set = set(bb_rev)
-            gh_set = {x.split("__")[0].split("_")[0] for x in gh_rev}  # crude normalize
-            if bb_set and gh_set and bb_set != gh_set:
-                report["notes"].append(
-                    f"PR {n}: reviewer set differs BB={sorted(bb_set)} GH={sorted(gh_set)} "
-                    f"(mannequin mapping is expected to differ)")
+            gh_set = set(gh_rev_norm)
+            only_bb = sorted(bb_set - gh_set)
+            only_gh = sorted(gh_set - bb_set)
+            if only_bb or only_gh:
+                parts = []
+                if only_bb:
+                    parts.append("only-BB: " + ", ".join(
+                        f"{u}({bb_status.get(u, '?')})" for u in only_bb))
+                if only_gh:
+                    parts.append(f"only-GH: {only_gh}")
+                report["notes"].append(f"PR {n}: reviewer set differs — {'; '.join(parts)}")
+
+            for u in sorted(bb_set & gh_set):
+                expected_gh = _BB_TO_GH.get(bb_status.get(u))
+                if expected_gh and gh_best.get(u) != expected_gh:
+                    report["notes"].append(
+                        f"PR {n}: reviewer {u} status mismatch "
+                        f"BB={bb_status[u]} GH={gh_best.get(u, 'NONE')}")
 
             # comment bodies: every BB top-level PR comment should appear (normalized)
             # in some GH issue comment (GH flattens threads + applies markdown).
@@ -510,7 +554,9 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
             rec = {
                 "pr": n,
                 "bb_reviewers": bb_rev,
-                "gh_reviewers": gh_rev,
+                "bb_reviewer_statuses": bb_status,
+                "gh_reviewers": gh_rev_all,
+                "gh_reviewer_best_state": gh_best,
                 "bb_comment_count": len(bb_bodies),
                 "gh_comment_count": len(comments),
                 "gh_comment_missing": len(missing),
