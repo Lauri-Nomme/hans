@@ -823,7 +823,7 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 pct = 100.0 * i / total if total else 100.0
                 log(f"deep {i}/{total} ({pct:4.1f}%, {rate:,.1f}/s, "
                     f"ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d}) "
-                    f"remaining={client.remaining}")
+                    f"gh-budget-remaining={client.remaining}")
     finally:
         if deepf:
             deepf.close()
