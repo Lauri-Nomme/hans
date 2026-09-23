@@ -475,11 +475,17 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     pr_by_id = {p["id"]: p for p in prs}
 
     def _norm_login(login):
-        """Normalize EMU logins: strip __mannequin or _org suffix."""
+        """Normalize EMU logins: strip __mannequin-style suffix, or an
+        underscore suffix that looks machine-generated (short + contains a
+        digit) so natural logins like 'jane_dev' or 'bob_2f' are NOT mangled.
+
+        Only the '__' split is unconditional (documented EMU mannequin form);
+        the '_' suffix fallback requires a digit to avoid mislabeling real
+        users as mannequins."""
         if "__" in login:
             return login.split("__")[0]
         parts = login.rsplit("_", 1)
-        if len(parts) == 2 and len(parts[1]) <= 6:
+        if len(parts) == 2 and len(parts[1]) <= 6 and any(c.isdigit() for c in parts[1]):
             return parts[0]
         return login
 
@@ -498,10 +504,12 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
             # GH: all users who submitted a review (any state)
             bb = pr_by_id.get(n, {})
             bb_reviewers_raw = bb.get("reviewers") or []
-            bb_rev = sorted(r.get("user", {}).get("slug") or r.get("user", {}).get("name")
-                            for r in bb_reviewers_raw)
-            bb_status = {(r.get("user", {}).get("slug") or r.get("user", {}).get("name")):
-                         r.get("status", "UNKNOWN") for r in bb_reviewers_raw}
+            def _u(rv):
+                u = (rv or {}).get("user")
+                return ((u or {}).get("slug") or (u or {}).get("name"))
+            bb_rev = sorted(x for x in (_u(r) for r in bb_reviewers_raw) if x)
+            bb_status = {_u(r): r.get("status", "UNKNOWN")
+                         for r in bb_reviewers_raw if _u(r)}
 
             gh_rev_all = sorted({(r.get("user") or {}).get("login")
                                  for r in reviews
