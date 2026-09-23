@@ -219,15 +219,42 @@ def verify_git_refs(scrape_git, org_repo, client, report):
     only_remote = {r: remote[r] for r in set(remote) - set(local)}
     sha_diff = {r: (local[r], remote[r]) for r in set(local) & set(remote)
                 if local[r] != remote[r]}
-    if only_local:
-        report["genuine"].append(f"refs only in BB: {sorted(only_local)}")
-    if only_remote:
-        report["genuine"].append(f"refs only in GH: {sorted(only_remote)}")
+
+    def case_collided(rname):
+        """A ref missing on the other side is a benign case-collision if the
+        SAME name in a different casing exists there pointing at the same SHA
+        (e.g. mara/WIP/.. vs mara/wip/.. — GitHub collapses case-insensitive
+        duplicate names; nothing is lost)."""
+        other = remote if rname in only_local else local
+        here = local if rname in only_local else remote
+        for o in other:
+            if o.lower() == rname.lower() and o != rname and other[o] == here[rname]:
+                return True
+        return False
+
+    col_local = {r for r in only_local if case_collided(r)}
+    col_remote = {r for r in only_remote if case_collided(r)}
+    real_local = {r: only_local[r] for r in only_local if r not in col_local}
+    real_remote = {r: only_remote[r] for r in only_remote if r not in col_remote}
+
+    if real_local:
+        report["genuine"].append(f"refs only in BB: {sorted(real_local)}")
+    if real_remote:
+        report["genuine"].append(f"refs only in GH: {sorted(real_remote)}")
+    if col_local:
+        report["notes"].append(
+            f"git refs: {sorted(col_local)} only in BB — case-variant duplicate "
+            f"of a GH ref pointing at the same SHA (GitHub collapses "
+            f"case-insensitive names); benign, no content loss")
+    if col_remote:
+        report["notes"].append(
+            f"git refs: {sorted(col_remote)} only in GH — case-variant duplicate "
+            f"of a BB ref (benign)")
     if sha_diff:
         report["genuine"].append(f"refs differ: { {k: v for k, v in list(sha_diff.items())[:5]} }")
     report["notes"].append(f"git refs: {len(local)} local, {len(remote)} remote, "
                            f"{len(sha_diff)} sha-diffs")
-    return not (only_local or only_remote or sha_diff)
+    return not (real_local or real_remote or sha_diff)
 
 
 def verify_git_objects(scrape_git, org_repo, client, report):
