@@ -131,11 +131,13 @@ def _replay_findings(rec, strict_inline, report):
 class RateLimitClient:
     """urllib wrapper: rate-limit aware, retry with backoff, persistent cache, paginate.
 
-    The cache persists across runs (one JSON file mapping request-URL -> body+etag),
-    so a repeat gate3 run iterates on data it already fetched instead of re-querying
-    GitHub. By default a cached URL is served from disk without a network call
-    (post-migration validation is against a static GH state); pass refresh=True to
-    request revalidation via ETag."""
+    The cache persists across runs as an append-only JSONL file (one line per
+    request: {"url","etag","body"}), so each fetched response costs an O(1)
+    append instead of rewriting the whole cache. On load every line is read
+    into memory (last wins); a legacy single-object JSON cache is migrated to
+    JSONL in place automatically. By default a cached URL is served from disk
+    without a network call (post-migration validation is against a static GH
+    state); pass refresh=True to request revalidation via ETag."""
 
     def __init__(self, token, cache_path=None, quiet=False, budget_headroom=10,
                  refresh=False):
@@ -148,22 +150,65 @@ class RateLimitClient:
         self.remaining = None
         self.reset = None
         self._cache_path = cache_path
-        self._disk = {}
-        if cache_path and os.path.exists(cache_path):
-            try:
-                self._disk = json.loads(open(cache_path, encoding="utf-8").read())
-            except Exception:
-                self._disk = {}
+        self._disk = {}          # url -> {"etag":..., "body":...}
+        self._load_cache()
 
-    def _save(self):
-        if self._cache_path:
+    def _load_cache(self):
+        if not self._cache_path or not os.path.exists(self._cache_path):
+            return
+        try:
+            raw = open(self._cache_path, encoding="utf-8").read()
+        except Exception as e:
+            log(f"cache read failed: {e}")
+            return
+        # Legacy format: the whole file is one JSON object {url: {etag, body}}.
+        legacy = None
+        try:
+            obj = json.loads(raw)
+            if (isinstance(obj, dict) and obj
+                    and all(isinstance(v, dict) and "body" in v
+                            for v in obj.values())):
+                legacy = obj
+        except Exception:
+            pass
+        if legacy is not None:
+            for url, ent in legacy.items():
+                self._disk[url] = {"etag": ent.get("etag"), "body": ent.get("body")}
+            log(f"cache: migrating legacy JSON -> JSONL ({len(self._disk)} entries)")
+            self._rewrite_jsonl()
+            return
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
             try:
-                tmp = self._cache_path + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(self._disk, f)
-                os.replace(tmp, self._cache_path)
-            except Exception as e:
-                log(f"cache write failed: {e}")
+                rec = json.loads(line)
+            except Exception:
+                continue            # skip a torn trailing line from a crash
+            if isinstance(rec, dict) and "url" in rec and "body" in rec:
+                self._disk[rec["url"]] = {"etag": rec.get("etag"),
+                                          "body": rec["body"]}
+
+    def _rewrite_jsonl(self):
+        """One-time rewrite of the whole cache as JSONL (legacy migration)."""
+        if not self._cache_path:
+            return
+        tmp = self._cache_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for url, ent in self._disk.items():
+                f.write(json.dumps({"url": url, "etag": ent.get("etag"),
+                                    "body": ent.get("body")}) + "\n")
+        os.replace(tmp, self._cache_path)
+
+    def _save(self, url, etag, body):
+        """Append one cache entry (O(1)); no full-file rewrite."""
+        if not self._cache_path:
+            return
+        try:
+            with open(self._cache_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"url": url, "etag": etag, "body": body}) + "\n")
+        except Exception as e:
+            log(f"cache write failed: {e}")
 
     def cached_body(self, url):
         """Body from an earlier run for this exact URL, or None."""
@@ -222,9 +267,9 @@ class RateLimitClient:
                     self.requests += 1
                     body = r.read().decode()
                     if use_cache:
-                        self._disk[url] = {"body": body,
-                                           "etag": r.headers.get("ETag")}
-                        self._save()
+                        etag_new = r.headers.get("ETag")
+                        self._disk[url] = {"body": body, "etag": etag_new}
+                        self._save(url, etag_new, body)
                     return json.loads(body) if body else None
             except urllib.error.HTTPError as e:
                 self._update_limits(e.headers or {})
@@ -793,9 +838,10 @@ def main():
     ap.add_argument("--limit-prs", type=int, default=0, help="cap PRs checked (test)")
     ap.add_argument("--progress-every", type=int, default=100)
     ap.add_argument("--cache", default=None,
-                    help="persist GH API responses to a JSON file and reuse them "
-                         "on re-runs (fast iteration; no network for cached URLs). "
-                         "Default: no persistent cache, live queries every run.")
+                    help="persist GH API responses to an append-only JSONL file "
+                         "and reuse them on re-runs (fast iteration; no network "
+                         "for cached URLs). A legacy single-object JSON cache is "
+                         "migrated in place. Default: no persistent cache.")
     ap.add_argument("--refresh", action="store_true",
                     help="with --cache: revalidate cached URLs via ETag instead "
                          "of serving them from disk (slower, fresh data)")
