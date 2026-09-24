@@ -24,11 +24,14 @@ Candidate SHAs per PR (from rest/pr_<id>_activities.json + the PR list):
   * fromRef/toRef.latestCommit     -> current PR refs
 
 For each unique SHA it reports:
-  * bb_reachable : ancestor of the PR's CURRENT head in the local mirror?
+  * bb_reachable : ancestor of the PR's CURRENT head in the local BB mirror?
                    (a previousFromHash that is NOT an ancestor = truly f-b-a)
-  * gh_present   : GET /repos/{repo}/git/commits/{sha} -> object exists on GH?
-                   (200 = exists, even if unreachable; 404 = GEI never pushed it)
-  * gh_reachable : ancestor of any GH ref? (only with --gh-git, a local clone)
+  * gh_reachable : is the commit reachable from any GH ref? Checked FIRST
+                   against a local mirror (--gh-git, cloned once if absent):
+                   if it's in the mirror it is present, with NO API call.
+  * gh_present   : only for SHAs the mirror lacks (absent, or pushed but
+                   unreferenced): GET /repos/{repo}/git/commits/{sha}
+                   (200 = exists on GH but unreferenced, 404 = never pushed).
 
 Output: a summary table + JSONL of every (pr, sha, kind, flags) to --out.
 Re-running with the same --out resumes: SHAs already present are skipped and
@@ -39,10 +42,8 @@ Usage (Windows workbox):
   python corpus\\diag_fba_commits.py ^
       --scrape D:\\path\\to\\scrape ^
       --repo MY-ORG/my-repo ^
+      --gh-git gh-mirror ^        :: cloned automatically if missing
       --out fba.jsonl
-  :: optional, for GH reachability (clone once):
-  git clone --mirror https://x-access-token:%GH_PAT%@github.com/MY-ORG/my-repo.git gh-mirror
-  python corpus\\diag_fba_commits.py --scrape ... --repo ... --gh-git gh-mirror --out fba.jsonl
 """
 import argparse
 import json
@@ -144,6 +145,26 @@ def gh_reachable_set(ghgit):
     return set(r.stdout.split())
 
 
+def ensure_gh_mirror(repo, pat, path):
+    """Make sure `path` is a mirror clone of the GH repo (clone once if not).
+
+    A mirror holds every object reachable from a ref — enough to answer the
+    reachability question locally, so the GH API is only needed for SHAs the
+    mirror is missing."""
+    if (Path(path) / "objects").exists():
+        return path
+    url = f"https://x-access-token:{pat}@github.com/{repo}.git"
+    log(f"gh-git: cloning mirror into {path} (one time, this can take a while)")
+    r = subprocess.run(["git", "clone", "--quiet", "--mirror", url, str(path)],
+                       capture_output=True, text=True, timeout=7200)
+    if r.returncode != 0:
+        raise SystemExit(f"gh-git: clone failed: {r.stderr[:300]}")
+    # don't persist the token in the mirror's config
+    subprocess.run(["git", "-C", str(path), "remote", "set-url", "origin",
+                    f"https://github.com/{repo}.git"], capture_output=True)
+    return path
+
+
 # --------------------------------------------------------------------- GH API
 class GH:
     def __init__(self, token):
@@ -226,7 +247,9 @@ def main():
     ap.add_argument("--bb-git", default=None,
                     help="BB mirror for reachability (default <scrape>/git)")
     ap.add_argument("--gh-git", default=None,
-                    help="local clone/mirror of the GH repo for reachability")
+                    help="local mirror of the GH repo; checked first so only "
+                         "missing SHAs hit the API. Cloned automatically if the "
+                         "path does not exist.")
     ap.add_argument("--out", default=None, help="JSONL output path")
     ap.add_argument("--limit-prs", type=int, default=0)
     ap.add_argument("--fba-only", action="store_true",
@@ -263,7 +286,10 @@ def main():
                 e["text"] = extra["text"]
     log(f"candidate SHAs: {len(cand)}")
 
-    gh_reach = gh_reachable_set(args.gh_git) if args.gh_git else None
+    gh_reach = None
+    if args.gh_git:
+        ensure_gh_mirror(args.repo, args.pat, args.gh_git)
+        gh_reach = gh_reachable_set(args.gh_git)
 
     # Only SHAs that were a PR *source* tip / comment anchor can be "force-
     # pushed away" relative to the PR head. Base-branch tips (toRef) and merge
@@ -309,8 +335,14 @@ def main():
         bb_reach = None if not reaches else any(reaches)
         is_fba = (bb_reach is False
                   and "rescoped_previousFromHash" in e["kinds"])
-        present = gh.present(args.repo, sha)
-        ghr = (sha in gh_reach) if gh_reach is not None else None
+        # Local GH mirror first: a commit reachable from a ref is present by
+        # definition, so NO API call is needed. Only SHAs the mirror lacks
+        # (absent, or pushed-but-unreferenced) go to the GH API.
+        if gh_reach is not None and sha in gh_reach:
+            present, ghr = True, True
+        else:
+            present = gh.present(args.repo, sha)
+            ghr = False if gh_reach is not None else None
         row = {"prs": sorted(e["prs"]), "sha": sha,
                "kinds": sorted(e["kinds"]), "orphaned_anchor": e["orphaned"],
                "text": e["text"], "bb_reachable": bb_reach,
@@ -358,6 +390,8 @@ def main():
 
     log("=== summary ===")
     log(json.dumps(tally))
+    log(f"GH API calls: {gh.calls} — everything else resolved from the local "
+        f"mirror (reachable-and-present, no API needed)")
     fba = [r for r in all_rows if r.get("force_pushed_away")]
     log(f"force-pushed-away source tips: {len(fba)}")
     for r in fba[:40]:
