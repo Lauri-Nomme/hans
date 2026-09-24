@@ -75,8 +75,9 @@ def main():
                      "missing_nonorphaned"] += 1
             else:
                 matched_ids.add(id(c))
-                anchored = not (c.get("line") is None
-                                and c.get("original_line") is None)
+                # GH "outdated": the line is no longer in the diff -> line is
+                # null (original_line keeps the old position).
+                anchored = c.get("line") is not None
                 st = "placed" if anchored else "outdated"
                 summ[st] += 1
             rows.append((st, b, c))
@@ -92,8 +93,8 @@ def main():
                    "outdated": "OUTDATED",
                    "missing": "MISSING "}[st]
             extra_ = " orphaned" if b["orphaned"] else ""
-            ghpos = (f"gh_line={c.get('line')}" if c is not None
-                     else f"anchor={anchor}{extra_}")
+            ghpos = (f"gh_line={c.get('line')} gh_orig={c.get('original_line')}"
+                     if c is not None else f"anchor={anchor}{extra_}")
             print(f"   [{tag}] id={b['id']} d{b['depth']} {ghpos}  "
                   f"{b['text'][:60]!r}")
         if extra:
