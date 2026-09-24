@@ -43,7 +43,8 @@ def cmd_assemble(args):
                  instance_name=args.instance_name, node_id=node_id,
                  export_mtime=args.mtime, obj_tar_bin=args.obj_tar_bin,
                  obj_tar_chunks=args.obj_tar_chunks,
-                 merge_base_bin=args.merge_base_bin)
+                 merge_base_bin=args.merge_base_bin,
+                 keep_tag_prefix=args.keep_tag_prefix)
     out = em.assemble(args.out)
     n = sum(1 for _ in tarfile.open(out))
     _log_archive(f"archive complete: {n} entries")
@@ -261,6 +262,11 @@ def main(argv=None):
     a.add_argument("--merge-base-bin", default=None,
                    help="path to the bb-merge-base Rust helper for batched "
                         "merge-base (libgit2); falls back to git CLI if absent")
+    a.add_argument("--keep-tag-prefix", default=None,
+                   help="EXPERIMENTAL (breaks export fidelity): emit "
+                        "refs/tags/<prefix><sha> for every refs/keep/<sha> in the "
+                        "scrape mirror, so force-pushed-away commits become "
+                        "reachable on GH via real tags")
     a.set_defaults(fn=cmd_assemble)
 
     v = sub.add_parser("validate")

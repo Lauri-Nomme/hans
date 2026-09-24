@@ -40,7 +40,8 @@ def _gzbuf(data: bytes) -> bytes:
 class Emitter:
     def __init__(self, model, app_version="9.4.18", build_version="9004018",
                  instance_name="Bitbucket", node_id=None, export_mtime=None,
-                 obj_tar_bin=None, obj_tar_chunks=0, merge_base_bin=None):
+                 obj_tar_bin=None, obj_tar_chunks=0, merge_base_bin=None,
+                 keep_tag_prefix=None):
         self.m = model
         self.app_version = app_version
         self.build_version = build_version
@@ -53,6 +54,10 @@ class Emitter:
         self.obj_tar_bin = obj_tar_bin
         self.obj_tar_chunks = int(obj_tar_chunks or 0)
         self.merge_base_bin = merge_base_bin
+        # EXPERIMENTAL (breaks fidelity): emit refs/tags/<prefix><sha> for every
+        # refs/keep/<sha> in the scrape mirror, so force-pushed-away commits
+        # become reachable on GH via real tags. Default None = faithful archive.
+        self.keep_tag_prefix = keep_tag_prefix
 
     # ---------------- low-level JSON builders ----------------------------
     def instance_details(self):
@@ -496,6 +501,25 @@ class Emitter:
             display = t.get("displayId") or t["id"].replace("refs/tags/", "")
             target = t.get("hash") or t["latestCommit"]   # annotated -> tag object
             self._add_ref(entries, f"refs/tags/{display}", target, "tag")
+        if self.keep_tag_prefix:
+            # EXPERIMENT: expose every refs/keep/<sha> in the scrape mirror as a
+            # real tag, making force-pushed-away commits reachable on GH.
+            gitdir = self.m.dir / "git"
+            shas = []
+            if (gitdir / "objects").exists():
+                try:
+                    p = subprocess.run(
+                        ["git", "-C", str(gitdir), "for-each-ref", "refs/keep/",
+                         "--format=%(objectname)"],
+                        capture_output=True, text=True)
+                    shas = sorted({l.strip() for l in p.stdout.splitlines() if l.strip()})
+                except Exception as e:
+                    _log(f"keep-tag: for-each-ref failed: {e}")
+            for sha in shas:
+                self._add_ref(entries, f"refs/tags/{self.keep_tag_prefix}{sha}",
+                              sha, "keep-tag")
+            _log(f"keep-tag: emitted {len(shas)} refs/tags/"
+                 f"{self.keep_tag_prefix}<sha> (experimental)")
         for pr in self.m.prs() or []:
             if pr.get("state") == "OPEN":
                 self._add_ref(entries, f"refs/pull-requests/{pr['id']}/from",
