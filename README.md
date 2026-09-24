@@ -310,18 +310,30 @@ migration's warning log can be triaged against a known, expected list:
 - **Review threads on removed lines.** A comment anchored on a `REMOVED` line
   has no destination-side line for GitHub to attach to; GEI reports it as not
   placeable. Same category as above.
-- **Review threads anchored on an orphaned/intermediate commit**
-  (`REVIEW_THREAD_MISSING_START_COMMIT_OID`). An inline comment made on an
-  earlier head of a force-pushed PR anchors on a commit that is not the PR's
-  final head. The archive faithfully retains that commit (object present,
-  reachable, base-is-ancestor — validated), exactly as a real Bitbucket export
-  does; GEI still cannot attach the thread because the anchor commit is not the
-  imported PR's head. Reproduced in the lab golden (PR9): Bitbucket marks such a
-  comment `orphaned:true` — it vanishes from the `/comments` listing but
-  survives in the activities and in the admin export (which `hans` round-trips
-  identically). The residual failures are thus GEI's handling of data Bitbucket
-  itself produces; no archive-side fix is possible without fabricating a
-  PR-head relationship. Accept as expected loss.
+- **Inline review threads on a force-pushed-away head**
+  (`REVIEW_THREAD_MISSING_START_COMMIT_OID`). A comment made on an earlier head
+  of a force-pushed PR anchors on a commit that is not the PR's final head.
+  Bitbucket marks it `orphaned:true`; it vanishes from `/comments` but survives
+  in the activities and in the admin export, which `hans` round-trips
+  identically. Verified in the lab against golden **PR10**, a *true*
+  force-push-away (the branch is reset to v1's parent and a new commit pushed,
+  so v1 is unreachable from any ref):
+  - The **root** comment is imported by GEI as **outdated** (`line: null`,
+    `original_line` set) — kept, not dropped — even though its anchor commit is
+    absent on GitHub (404).
+  - Emitting the vanished tip as a real tag (`--keep-tag-prefix`, an
+    experimental fidelity-breaking option) makes that commit present *and*
+    reachable on GitHub — and the outcome is **identical**: the root is still
+    outdated. Anchor-commit reachability is therefore **not** the variable.
+- **Replies to inline review threads are dropped.** GEI emits
+  `Skipping Commented review in PR N for BBS comment <id> because it did not
+  have any valid threads or comments to import` and the reply never appears on
+  GitHub. Reproduced for *every* reply in the lab golden (PR9 113/117, PR10
+  120, both orphaned and non-orphaned parents) and consistent with the
+  production log's `SKIPPED_NO_VALID_THREADS` replies. An inline root that was
+  **edited** (version > 0) is also dropped (PR9 112). This is the dominant
+  residual loss; no archive-side change affects it (it is unrelated to
+  refs/keep or force-pushed-away objects). Accept as expected loss.
 
 ## Repo layout
 

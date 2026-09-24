@@ -25,11 +25,17 @@ from gate3 import (load_scrape, load_activities, bb_inline_comments,   # noqa: E
                    norm_comment, load_gh_review_comments, RateLimitClient)
 
 
-def match_gh(bb_text, gh_comments):
-    """Return the first GH comment whose normalized body matches bb_text."""
+def match_gh(bb_text, gh_comments, used):
+    """Best *unused* GH comment for bb_text: exact normalized-body match first,
+    then bidirectional containment. Each GH comment matches at most one BB
+    comment, so near-identical bodies are attributed deterministically."""
     if not bb_text:
         return None
-    for c in gh_comments:
+    pool = [c for c in gh_comments if id(c) not in used]
+    for c in pool:
+        if norm_comment(c.get("body")) == bb_text:
+            return c
+    for c in pool:
         g = norm_comment(c.get("body"))
         if g and (bb_text in g or g in bb_text):
             return c
@@ -67,7 +73,7 @@ def main():
         rows = []
         matched_ids = set()
         for b in bb:
-            c = match_gh(b["text"], gh)
+            c = match_gh(b["text"], gh, matched_ids)
             if c is None:
                 st = "missing"
                 summ["missing"] += 1
