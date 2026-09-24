@@ -707,7 +707,7 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     records are loaded AND their notes/genuine findings re-derived
     (_replay_findings), so a cancel/restart preserves the PASS/FAIL decision —
     not just the counts."""
-    DEEP_SCHEMA = 4   # bump when the per-PR record shape changes
+    DEEP_SCHEMA = 5   # bump when the per-PR record shape changes
     done = set()
     if state_path and os.path.exists(state_path):
         try:
@@ -842,6 +842,8 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                               for g in gh_inline_bodies)]
             mis_orph = [b for b in mis if b["orphaned"]]
             mis_non = [b for b in mis if not b["orphaned"]]
+            mis_roots = [b for b in mis if b["root"]]
+            mis_replies = [b for b in mis if not b["root"]]
             if mis:
                 line = (f"PR {n}: {len(mis)}/{len(bb_inline)} inline comment(s) "
                         f"missing on GH "
@@ -877,6 +879,8 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 "bb_inline_missing": len(mis),
                 "bb_inline_missing_orphaned": len(mis_orph),
                 "bb_inline_missing_nonorphaned": len(mis_non),
+                "bb_inline_missing_roots": len(mis_roots),
+                "bb_inline_missing_replies": len(mis_replies),
             }
             report["deep"].append(rec)
             if deepf:
@@ -992,7 +996,8 @@ def main():
             "bb_inline_threads", "bb_orphaned_threads", "bb_inline_comments",
             "gh_inline_threads", "gh_outdated_threads", "gh_inline_comments",
             "bb_inline_missing", "bb_inline_missing_orphaned",
-            "bb_inline_missing_nonorphaned")}
+            "bb_inline_missing_nonorphaned",
+            "bb_inline_missing_roots", "bb_inline_missing_replies")}
         log("[inline-tally] " + json.dumps(tally))
     if report["genuine"]:
         log(f"  GENUINE ({len(report['genuine'])}):")
