@@ -31,6 +31,8 @@ For each unique SHA it reports:
   * gh_reachable : ancestor of any GH ref? (only with --gh-git, a local clone)
 
 Output: a summary table + JSONL of every (pr, sha, kind, flags) to --out.
+Re-running with the same --out resumes: SHAs already present are skipped and
+the final summary is computed from the whole file. Progress shows rate + ETA.
 
 Usage (Windows workbox):
   set GH_PAT=ghp_...
@@ -186,6 +188,24 @@ class GH:
                 time.sleep(min(2 ** attempt * 2, 60))
         raise RuntimeError(f"gave up on {url}")
 
+    def validate(self, repo):
+        """Fail fast with a clear message on bad credentials / no access."""
+        req = urllib.request.Request(f"{API}/repos/{repo}", headers={
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": "hans-fba-check",
+            "Accept": "application/vnd.github+json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                self._limits(r.headers)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise SystemExit("GitHub 401 Unauthorized — bad/expired token. "
+                                 "Pass --pat or set GH_PAT.")
+            if e.code == 404:
+                raise SystemExit(f"GitHub 404 for {repo} — repo not found or "
+                                 f"this token has no access.")
+            raise
+
     def _limits(self, h):
         rl = h.get("X-RateLimit-Remaining")
         if rl is not None:
@@ -244,8 +264,6 @@ def main():
     log(f"candidate SHAs: {len(cand)}")
 
     gh_reach = gh_reachable_set(args.gh_git) if args.gh_git else None
-    gh = GH(args.pat)
-    out = open(args.out, "w", encoding="utf-8") if args.out else None
 
     # Only SHAs that were a PR *source* tip / comment anchor can be "force-
     # pushed away" relative to the PR head. Base-branch tips (toRef) and merge
@@ -255,10 +273,30 @@ def main():
                     "rescoped_toHash", "rescoped_previousToHash",
                     "comment_anchor"}
 
-    tally = {"total": 0, "gh_present": 0, "gh_absent": 0,
-             "bb_fba": 0, "gh_present_and_bb_fba": 0, "gh_present_and_gh_unreachable": 0}
-    rows = []
-    for i, (sha, e) in enumerate(sorted(cand.items()), 1):
+    # Resume: a rate-limited run takes hours (1 API call per SHA), so skip any
+    # SHA already written to --out and append rather than restart.
+    done_shas = set()
+    if args.out and os.path.exists(args.out):
+        try:
+            for line in open(args.out, encoding="utf-8"):
+                line = line.strip()
+                if line:
+                    done_shas.add(json.loads(line)["sha"])
+        except Exception:
+            pass
+    todo = {s: e for s, e in cand.items() if s not in done_shas}
+    log(f"to check: {len(todo)}" +
+        (f" (resuming; {len(done_shas)} already in {args.out})" if done_shas else ""))
+
+    gh = GH(args.pat)
+    gh.validate(args.repo)
+    out = (open(args.out, "a", encoding="utf-8") if done_shas
+           else open(args.out, "w", encoding="utf-8")) if args.out else None
+
+    total = len(todo)
+    last_t = time.time()
+    last_i = 0
+    for i, (sha, e) in enumerate(sorted(todo.items()), 1):
         is_source = bool(e["kinds"] & SOURCE_KINDS)
         reaches = []
         if is_source:
@@ -273,47 +311,68 @@ def main():
                   and "rescoped_previousFromHash" in e["kinds"])
         present = gh.present(args.repo, sha)
         ghr = (sha in gh_reach) if gh_reach is not None else None
-        tally["total"] += 1
-        tally["gh_present" if present else "gh_absent"] += 1
-        if is_fba:
-            tally["bb_fba"] += 1
-            if present:
-                tally["gh_present_and_bb_fba"] += 1
-        if present and ghr is False:
-            tally["gh_present_and_gh_unreachable"] += 1
         row = {"prs": sorted(e["prs"]), "sha": sha,
                "kinds": sorted(e["kinds"]), "orphaned_anchor": e["orphaned"],
                "text": e["text"], "bb_reachable": bb_reach,
                "force_pushed_away": is_fba,
                "gh_present": present, "gh_reachable": ghr}
-        rows.append(row)
         if out:
             out.write(json.dumps(row) + "\n")
-        if i % 100 == 0:
-            log(f"checked {i}/{len(cand)} (gh calls={gh.calls}, "
-                f"remaining={gh.remaining})")
+            out.flush()
+        if i % 100 == 0 or i == total:
+            now = time.time()
+            rate = (i - last_i) / max(now - last_t, 0.001)   # windowed
+            eta = (total - i) / max(rate, 1e-9)
+            log(f"checked {i}/{total} ({100.0*i/total:4.1f}%, {rate:,.1f}/s, "
+                f"ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d}) "
+                f"gh-calls={gh.calls} gh-budget-remaining={gh.remaining}")
+            last_t, last_i = now, i
 
     if out:
         out.close()
 
+    # Summary from the full --out file (so a resumed run reports complete
+    # numbers, not just this session's rows).
+    all_rows = []
+    if args.out and os.path.exists(args.out):
+        for line in open(args.out, encoding="utf-8"):
+            line = line.strip()
+            if line:
+                try:
+                    all_rows.append(json.loads(line))
+                except Exception:
+                    pass
+
+    tally = {"total": 0, "gh_present": 0, "gh_absent": 0,
+             "bb_fba": 0, "gh_present_and_bb_fba": 0,
+             "gh_present_and_gh_unreachable": 0}
+    for r in all_rows:
+        tally["total"] += 1
+        tally["gh_present" if r["gh_present"] else "gh_absent"] += 1
+        if r.get("force_pushed_away"):
+            tally["bb_fba"] += 1
+            if r["gh_present"]:
+                tally["gh_present_and_bb_fba"] += 1
+        if r["gh_present"] and r.get("gh_reachable") is False:
+            tally["gh_present_and_gh_unreachable"] += 1
+
     log("=== summary ===")
     log(json.dumps(tally))
-    # the decisive view: SHAs that were a replaced PR source tip locally
-    fba = [r for r in rows if r["force_pushed_away"]]
+    fba = [r for r in all_rows if r.get("force_pushed_away")]
     log(f"force-pushed-away source tips: {len(fba)}")
     for r in fba[:40]:
         log(f"  PR{r['prs']} {r['sha'][:12]} present_on_gh={r['gh_present']} "
             f"gh_reachable={r['gh_reachable']} orphaned={r['orphaned_anchor']} "
             f"{r['text']!r}")
-    orphan = [r for r in rows if r["orphaned_anchor"]]
+    orphan = [r for r in all_rows if r.get("orphaned_anchor")]
     log(f"orphaned-anchor SHAs: {len(orphan)}; "
         f"of those present on GH: {sum(1 for r in orphan if r['gh_present'])}")
-    src = [r for r in rows if r["bb_reachable"] is False and r["kinds"]
+    src = [r for r in all_rows if r.get("bb_reachable") is False and r["kinds"]
            and "comment_anchor" in r["kinds"]]
     log(f"comment-anchor SHAs not reachable from their PR head: {len(src)}; "
         f"present on GH: {sum(1 for r in src if r['gh_present'])}")
     if args.out:
-        log(f"wrote {len(rows)} rows -> {args.out}")
+        log(f"wrote {len(all_rows)} rows -> {args.out}")
     return 0
 
 
