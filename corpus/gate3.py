@@ -707,7 +707,7 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
     records are loaded AND their notes/genuine findings re-derived
     (_replay_findings), so a cancel/restart preserves the PASS/FAIL decision —
     not just the counts."""
-    DEEP_SCHEMA = 3   # bump when the per-PR record shape changes
+    DEEP_SCHEMA = 4   # bump when the per-PR record shape changes
     done = set()
     if state_path and os.path.exists(state_path):
         try:
@@ -831,10 +831,10 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 gh_inline = []
             gh_inline_bodies = [norm_comment(c.get("body")) for c in gh_inline]
             gh_roots = [c for c in gh_inline if c.get("in_reply_to_id") is None]
-            gh_unanchored = sum(
-                1 for c in gh_roots
-                if c.get("line") is None and c.get("position") is None
-                and c.get("original_line") is None)
+            # "outdated": GH keeps the comment but nulls `line` (original_line
+            # keeps the old position) — i.e. it couldn't anchor to the final
+            # diff. This is the bucket orphaned/force-pushed anchors land in.
+            gh_outdated = sum(1 for c in gh_roots if c.get("line") is None)
             bb_roots = [b for b in bb_inline if b["root"]]
             bb_orphaned_roots = [b for b in bb_roots if b["orphaned"]]
             mis = [b for b in bb_inline
@@ -872,7 +872,7 @@ def verify_pr_deep(prs, client, org_repo, report, state_path, limit_prs,
                 "bb_orphaned_threads": len(bb_orphaned_roots),
                 "bb_inline_comments": len(bb_inline),
                 "gh_inline_threads": len(gh_roots),
-                "gh_unanchored_threads": gh_unanchored,
+                "gh_outdated_threads": gh_outdated,
                 "gh_inline_comments": len(gh_inline),
                 "bb_inline_missing": len(mis),
                 "bb_inline_missing_orphaned": len(mis_orph),
@@ -990,7 +990,7 @@ def main():
     if deep:
         tally = {k: sum(d.get(k, 0) for d in deep) for k in (
             "bb_inline_threads", "bb_orphaned_threads", "bb_inline_comments",
-            "gh_inline_threads", "gh_unanchored_threads", "gh_inline_comments",
+            "gh_inline_threads", "gh_outdated_threads", "gh_inline_comments",
             "bb_inline_missing", "bb_inline_missing_orphaned",
             "bb_inline_missing_nonorphaned")}
         log("[inline-tally] " + json.dumps(tally))
