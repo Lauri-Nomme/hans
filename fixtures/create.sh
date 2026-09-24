@@ -269,6 +269,25 @@ EOF
   git add interleaved.md
   mkcommit "Ada Lovelace" "ada@example.com" "Ada Lovelace" "ada@example.com" "2024-05-10T09:00:00+00:00" "feat: interleaved v1"
 
+  # feature/rewritten: TRUE force-push-away repro (PR10). V1 lives here; prs.sh
+  # rewrites the branch (reset to V1's parent + a new commit) and force-pushes,
+  # so V1 becomes unreachable from ANY ref — retained only in the reflog and
+  # (via the scrape) refs/keep. This is the production force-pushed-away case,
+  # unlike PR9/PR6 whose "force-pushes" append and leave the old tip an
+  # ancestor (reachable, so GEI keeps those threads as outdated).
+  git checkout -q main
+  git branch feature/rewritten
+  git checkout -q feature/rewritten
+  cat > rewritten.md <<'EOF'
+# Rewritten
+
+- rewritten v1 alpha
+- rewritten v1 beta
+- rewritten v1 ORPHAN-ME
+EOF
+  git add rewritten.md
+  mkcommit "Ada Lovelace" "ada@example.com" "Ada Lovelace" "ada@example.com" "2024-05-13T09:00:00+00:00" "feat: rewritten v1 (will be force-pushed away)"
+
   # back to main
   git checkout -q main
 
@@ -279,6 +298,7 @@ EOF
     "+refs/heads/experiment/squash" "+refs/heads/feature/explore" "+refs/heads/feature/declined" \
     "+refs/heads/feature/stacked/base" "+refs/heads/feature/stacked/dependent" \
     "+refs/heads/feature/interleaved" \
+    "+refs/heads/feature/rewritten" \
     "+refs/tags/v1.0"
 
   log "git layer pushed (main + 7 feature branches + lightweight tag v1.0)"

@@ -510,4 +510,75 @@ log "PR9: v3 inline comment line=$V3_LINE"
 api POST "$R/pull-requests/$PR9_ID/approve" "" grace:grace-pw-123 >/dev/null || true
 log "PR9: grace approves final state (after all interleaved ops)"
 
-log "PR layer complete. PR ids: PR1=$PR1_ID PR2=$PR2_ID PR3=$PR3_ID PR4=$PR4_ID PR5=$PR5_ID PR6=$PR6_ID PR7=$PR7_ID PR8=$PR8_ID PR9=$PR9_ID"
+# ------------------------- PR 10: TRUE FORCE-PUSH-AWAY -----------------------
+# Unlike PR9 (whose pushes append commits, leaving v1 an ancestor), here v1 is
+# genuinely force-pushed away: the branch is reset to v1's parent and a new
+# commit is pushed, so v1 is NOT an ancestor of the head and is reachable only
+# via the reflog / refs-keep. This is the production
+# REVIEW_THREAD_MISSING_START_COMMIT_OID input.
+PR10_BRANCH=feature/rewritten
+PR10_ID="$(pr_by_branch "$PR10_BRANCH")"
+if [[ -z "$PR10_ID" ]]; then
+  log "creating PR10 ($PR10_BRANCH -> main, OPEN, true force-push-away)"
+  PR10_ID="$(pr_create "ada:ada-pw-123" \
+    '"feat: rewritten (true force-push-away)"' \
+    '"v1 is force-pushed away by resetting the branch and pushing a new commit; inline anchors on v1 mirror the production REVIEW_THREAD_MISSING case."' \
+    "$PR10_BRANCH" '[{"user":{"name":"grace"}}]' | jq -r '.id')"
+  log "PR10 id=$PR10_ID"
+fi
+sleep 15
+
+# comment + reply anchored on v1's ORPHAN-ME added line (the last added line),
+# whose content v2 removes -> BB cannot re-anchor it to the new head, so it
+# stays pinned to the vanished v1 commit with orphaned=true.
+R10_LINE="$(diff_line "$PR10_ID" "rewritten.md" "ADDED" | tail -1)"
+R10_V1_CID="$(api POST "$R/pull-requests/$PR10_ID/comments" \
+  "$(py_json "{'text': 'v1: anchored on a commit that will be force-pushed away', 'anchor': {'line': $R10_LINE, 'lineType': 'ADDED', 'fileType': 'TO', 'path': 'rewritten.md'}}")" | jq -r '.id')"
+R10_V1_REPLY="$(api POST "$R/pull-requests/$PR10_ID/comments" \
+  "$(py_json "{'text': 'v1: reply on the vanishing commit', 'parent': {'id': $R10_V1_CID}}")" | jq -r '.id')"
+log "PR10: v1 comment $R10_V1_CID + reply $R10_V1_REPLY (anchor on soon-unreachable commit)"
+
+# TRUE rewrite: reset to v1's parent, DELETE the anchored file (so BB cannot
+# re-anchor the comment to the new head), add a control file, force-push.
+git checkout -q "$PR10_BRANCH"
+R10_V1_COMMIT="$(git rev-parse "$PR10_BRANCH")"
+R10_BASE="$(git rev-parse "$PR10_BRANCH^")"
+git reset --hard -q "$R10_BASE"
+# (rewritten.md is gone after the reset to base — no git rm needed)
+cat > stable.md <<'EOF'
+# Stable
+
+- stable v2 line
+EOF
+git add stable.md
+mkcommit "Grace Hopper" "grace@example.com" "Grace Hopper" "grace@example.com" "2024-05-14T10:00:00+00:00" "feat: rewritten v2 (replaces v1, drops the anchored file)"
+sleep 15
+push_branches "ada:ada-pw-123" "+refs/heads/$PR10_BRANCH"
+R10_V2_TIP="$(git rev-parse "$PR10_BRANCH")"
+if git merge-base --is-ancestor "$R10_V1_COMMIT" "$R10_V2_TIP"; then
+  log "PR10: WARNING v1 ($R10_V1_COMMIT) is still an ancestor of $R10_V2_TIP"
+else
+  log "PR10: confirmed v1 ($R10_V1_COMMIT) force-pushed away; head $R10_V2_TIP"
+fi
+
+# wait for the drift processor, then comment on the control file (reachable)
+for _ in $(seq 1 20); do
+  AH="$(api GET "$R/pull-requests/$PR10_ID/comments?path=rewritten.md&limit=100" 2>/dev/null \
+    | jq -r --argjson id "$R10_V1_CID" '.values[] | select(.id==$id) | .anchor.toHash // ""' | head -1)"
+  [[ -n "$AH" ]] && break
+  sleep 1
+done
+log "PR10: after force-push, v1 comment anchor.toHash -> $AH"
+
+R10_V2_LINE="$(diff_line "$PR10_ID" "stable.md" "ADDED" | head -1)"
+api POST "$R/pull-requests/$PR10_ID/comments" \
+  "$(py_json "{'text': 'v2: anchored on the surviving head', 'anchor': {'line': $R10_V2_LINE, 'lineType': 'ADDED', 'fileType': 'TO', 'path': 'stable.md'}}")" >/dev/null
+log "PR10: v2 control comment on stable.md line=$R10_V2_LINE"
+
+# reviewer state last (any PR mutation resets it)
+api POST "$R/pull-requests/$PR10_ID/approve" "" grace:grace-pw-123 >/dev/null || true
+log "PR10: grace approves final state"
+
+git checkout -q main
+
+log "PR layer complete. PR ids: PR1=$PR1_ID PR2=$PR2_ID PR3=$PR3_ID PR4=$PR4_ID PR5=$PR5_ID PR6=$PR6_ID PR7=$PR7_ID PR8=$PR8_ID PR9=$PR9_ID PR10=$PR10_ID"
