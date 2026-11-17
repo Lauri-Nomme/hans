@@ -96,49 +96,6 @@ def _inner_map(data):
     return out
 
 
-def _check_ref_object_integrity(archive, problems):
-    """Every ref in each metadata.atl.tar.atl.gz must point at an object present
-    in the repo's objects.atl.tar. A dangling ref (REST snapshot at a different
-    moment than the git mirror, or a dropped object) makes the importer fail
-    with 'fatal: missing object ... for refs/...'."""
-    names = archive.getnames()
-    # group by repository dir: ...git_git/repositories/<rid>/...
-    rid_of = {}
-    for name in names:
-        m = re.search(r"/repositories/([^/]+)/", name)
-        if m:
-            rid_of[name] = m.group(1)
-    repos = {}
-    for name, rid in rid_of.items():
-        repos.setdefault(rid, {"meta": None, "objs": None})
-        if name.endswith("metadata.atl.tar.atl.gz"):
-            f = archive.extractfile(name)
-            repos[rid]["meta"] = gzip.decompress(f.read()) if f else b""
-        elif name.endswith("contents/objects.atl.tar") or name.endswith("objects.atl.tar"):
-            # Keep the seekable ExFileObject (not a buffered read): the inner
-            # tar is walked by headers only — tarfile seeks past member
-            # bodies — so validation costs O(names) RAM, never the size of
-            # the repo's object content.
-            repos[rid]["objs"] = archive.extractfile(name)
-    for rid, r in repos.items():
-        if r["meta"] is None or r["objs"] is None:
-            problems.append(f"repo {rid}: missing metadata.atl.tar or "
-                            f"objects.atl.tar in archive")
-            continue
-        with tarfile.open(fileobj=r["objs"], mode="r") as objs_tar:
-            objs = {m.name.replace("/", "") for m in objs_tar.getmembers()}
-        for refname, content in _inner_map(r["meta"]).items():
-            if not (refname.startswith("refs/") or
-                    refname.startswith("stash-refs/")):
-                continue
-            sha = content.decode("utf-8", "replace").strip()
-            if not sha:
-                continue
-            if sha not in objs:
-                problems.append(f"repo {rid}: ref {refname} -> missing object "
-                                f"{sha} (not in objects.atl.tar)")
-
-
 def _iter_json_hex_shas(obj):
     """Yield every 40-hex SHA in a JSON object tree (dicts/lists/strs)."""
     if isinstance(obj, dict):
@@ -152,39 +109,85 @@ def _iter_json_hex_shas(obj):
             yield obj
 
 
-def _check_json_object_integrity(archive, problems):
-    """Every commit SHA referenced by the archive's PR metadata/activity JSON
-    must exist in the repo's objects.atl.tar.
+def _present_objects(fileobj, wanted):
+    """Subset of `wanted` (object ids) present in an objects tar.
 
-    Inline review comments anchor on commits via thread.anchor.fromHash/toHash,
-    RESCOPED activities carry fromHash/toHash/previous*/added/removed commit
-    ids, MERGED carries the merge commit hash, and PR metadata carries
-    fromRef/toRef.latestCommit. None of these are refs — they live only inside
-    the activities/metadata JSON — so ref-only integrity checks cannot see
-    them. If such an object is missing, GEI fails the review thread with
+    Walks the tar headers only: tarfile seeks past member bodies, and each
+    TarInfo is dropped right after its name is checked (TarFile.members would
+    otherwise keep one per object, tens of millions on a big repo). RAM is
+    O(len(wanted)), never O(objects) or the size of the object content.
+    Stops early once every wanted id was seen."""
+    found = set()
+    if not wanted:
+        return found
+    with tarfile.open(fileobj=fileobj, mode="r") as objs_tar:
+        while True:
+            m = objs_tar.next()
+            if m is None:
+                break
+            objs_tar.members = []
+            name = m.name.replace("/", "")
+            if name in wanted:
+                found.add(name)
+                if len(found) == len(wanted):
+                    break
+    return found
+
+
+def _check_object_integrity(archive, problems):
+    """Every object the archive references must exist in the repo's
+    objects.atl.tar, in one pass over the object tar's headers.
+
+    Refs: every ref in metadata.atl.tar.atl.gz must point at an object. A
+    dangling ref (REST snapshot at a different moment than the git mirror, or
+    a dropped object) makes the importer fail with 'fatal: missing object ...
+    for refs/...'.
+
+    PR JSON: inline review comments anchor on commits via
+    thread.anchor.fromHash/toHash, RESCOPED activities carry
+    fromHash/toHash/previous*/added/removed commit ids, MERGED carries the
+    merge commit hash, and PR metadata carries fromRef/toRef.latestCommit.
+    None of these are refs, so ref-only checks cannot see them. If such an
+    object is missing, GEI fails the review thread with
     REVIEW_THREAD_MISSING_START_COMMIT_OID.
     """
-    names = archive.getnames()
-    rid_of = {}
-    for name in names:
-        m = re.search(r"/repositor(?:y|ies)/([^/]+)/", name)
-        if m:
-            rid_of[name] = m.group(1)
     repos = {}
-    for name, rid in rid_of.items():
-        if name.endswith("contents/objects.atl.tar") or name.endswith("objects.atl.tar"):
-            f = archive.extractfile(name)
-            repos.setdefault(rid, {"objs": None, "jsons": []})["objs"] = (
-                f.read() if f else b"")
+    for name in archive.getnames():
+        m = re.search(r"/repositor(?:y|ies)/([^/]+)/", name)
+        if not m:
+            continue
+        r = repos.setdefault(m.group(1), {"meta": None, "objs": None,
+                                          "jsons": [], "has_repositories": False})
+        if re.search(r"/repositories/([^/]+)/", name):
+            r["has_repositories"] = True
+        if name.endswith("metadata.atl.tar.atl.gz"):
+            r["meta"] = name
+        elif name.endswith("objects.atl.tar"):
+            r["objs"] = name
         elif name.endswith(".json.atl.gz") and (
                 "pullRequests/" in name or name.endswith("pullrequests.json.atl.gz")):
-            repos.setdefault(rid, {"objs": None, "jsons": []})["jsons"].append(name)
+            r["jsons"].append(name)
     for rid, r in repos.items():
+        check_refs = r["has_repositories"]
+        if check_refs and (r["meta"] is None or r["objs"] is None):
+            problems.append(f"repo {rid}: missing metadata.atl.tar or "
+                            f"objects.atl.tar in archive")
+            check_refs = False
         if r["objs"] is None:
-            problems.append(f"repo {rid}: missing objects.atl.tar in archive")
+            if r["jsons"]:
+                problems.append(f"repo {rid}: missing objects.atl.tar in archive")
             continue
-        with tarfile.open(fileobj=io.BytesIO(r["objs"]), mode="r") as objs_tar:
-            objs = {m.name.replace("/", "") for m in objs_tar.getmembers()}
+        refs = []  # (refname, sha)
+        if check_refs:
+            f = archive.extractfile(r["meta"])
+            for refname, content in _inner_map(gzip.decompress(f.read()) if f else b"").items():
+                if not (refname.startswith("refs/") or
+                        refname.startswith("stash-refs/")):
+                    continue
+                sha = content.decode("utf-8", "replace").strip()
+                if sha:
+                    refs.append((refname, sha))
+        cited = []  # (json name, sha)
         for jname in r["jsons"]:
             f = archive.extractfile(jname)
             data = gzip.decompress(f.read()) if f else b""
@@ -193,12 +196,21 @@ def _check_json_object_integrity(archive, problems):
             except Exception:
                 problems.append(f"repo {rid}: unparseable JSON {jname}")
                 continue
-            for sha in sorted(set(_iter_json_hex_shas(obj))):
-                if sha not in objs:
-                    problems.append(
-                        f"repo {rid}: {jname} references missing object {sha} "
-                        f"(not in objects.atl.tar) — review thread / activity "
-                        f"for this commit will not import")
+            cited.extend((jname, sha) for sha in sorted(set(_iter_json_hex_shas(obj))))
+        # Keep the seekable ExFileObject (never a buffered read of the tar).
+        present = _present_objects(
+            archive.extractfile(r["objs"]),
+            {sha for _, sha in refs} | {sha for _, sha in cited})
+        for refname, sha in refs:
+            if sha not in present:
+                problems.append(f"repo {rid}: ref {refname} -> missing object "
+                                f"{sha} (not in objects.atl.tar)")
+        for jname, sha in cited:
+            if sha not in present:
+                problems.append(
+                    f"repo {rid}: {jname} references missing object {sha} "
+                    f"(not in objects.atl.tar) — review thread / activity "
+                    f"for this commit will not import")
 
 
 def cmd_validate(args):
@@ -216,8 +228,7 @@ def cmd_validate(args):
                     problems.append(f"{name}: not gzip")
             elif name.endswith(".tar"):
                 pass
-        _check_ref_object_integrity(tar, problems)
-        _check_json_object_integrity(tar, problems)
+        _check_object_integrity(tar, problems)
     _log(f"validated {args.archive}: {len(problems)} problems")
     for p in problems:
         print("  ", p)
