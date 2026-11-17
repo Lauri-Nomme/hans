@@ -447,7 +447,10 @@ class Emitter:
         gitdir = self.m.dir / "git"
         if not (gitdir / "objects").exists():
             return None
-        shas = sorted(set(shas))
+        # filter out any None/empty target (a malformed dump): it will be
+        # treated as absent and dropped+warned by _add_ref, matching the old
+        # defensive behavior, instead of crashing sorted().
+        shas = sorted({s for s in shas if s})
         if not shas:
             return set()
         try:
