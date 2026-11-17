@@ -157,6 +157,12 @@ Produces `./scrape/my-repo/`:
 
 Add `--no-git` if you want the REST part only.
 
+Objects that Bitbucket hides (`refs/stash-refs/*`) are fetched by SHA. On large
+repositories raise `--sha-workers` (parallel fetches, default 1) and
+`--sha-batch` (SHAs per fetch, default 50). Objects the source no longer
+serves ("not our ref") are listed in `<out>/unfetchable.txt` and skipped on
+later runs; delete that file to probe them again.
+
 ### Step 2 — assemble the migration archive
 
 ```bash
