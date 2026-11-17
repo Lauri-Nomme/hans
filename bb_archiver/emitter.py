@@ -362,26 +362,43 @@ class Emitter:
         pairs = list(pair_for)
 
         if self.merge_base_bin:
-            return self._merge_bases_rust(gitdir, pairs, pair_for)
+            return self._merge_bases_rust(gitdir, pairs, pair_for, workers)
         return self._merge_bases_git(gitdir, pairs, pair_for, workers)
 
-    def _merge_bases_rust(self, gitdir, pairs, pair_for):
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import threading
-        _log(f"git objects: bb-merge-base computing {len(pairs)} merge-bases")
-        payload = "".join(f"{f} {t}\n" for f, t in pairs)
+    def _merge_bases_rust(self, gitdir, pairs, pair_for, workers=None):
+        """Run bb-merge-base across N parallel processes: the binary is
+        single-threaded, so each process answers a contiguous shard of pairs."""
+        from concurrent.futures import ThreadPoolExecutor
+        n = len(pairs)
+        if n == 0:
+            return {}
+        workers = min(workers or min(os.cpu_count() or 4, 8), n)
+        _log(f"git objects: bb-merge-base computing {n} merge-bases "
+             f"({workers} workers)")
         t0 = time.time()
-        proc = subprocess.run([self.merge_base_bin, str(gitdir)],
-                              input=payload, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise RuntimeError(f"bb-merge-base failed ({proc.returncode}): "
-                               f"{proc.stderr}")
-        lines = proc.stdout.splitlines()
-        if len(lines) != len(pairs):
-            raise RuntimeError(f"bb-merge-base returned {len(lines)} lines "
-                               f"for {len(pairs)} pairs")
+
+        def run_shard(shard):
+            payload = "".join(f"{f} {t}\n" for f, t in shard)
+            proc = subprocess.run([self.merge_base_bin, str(gitdir)],
+                                  input=payload, capture_output=True, text=True)
+            if proc.returncode != 0:
+                raise RuntimeError(f"bb-merge-base failed ({proc.returncode}): "
+                                   f"{proc.stderr}")
+            lines = proc.stdout.splitlines()
+            if len(lines) != len(shard):
+                raise RuntimeError(f"bb-merge-base returned {len(lines)} lines "
+                                   f"for {len(shard)} pairs")
+            return list(zip(shard, lines))
+
+        # contiguous shards so results extend back in pair order
+        shards = [pairs[i * n // workers:(i + 1) * n // workers]
+                  for i in range(workers)]
+        results = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for shard_res in pool.map(run_shard, shards):
+                results.extend(shard_res)
         _log(f"git objects: bb-merge-base done in {time.time() - t0:.1f}s")
-        return {pair_for[p]: (line or None) for p, line in zip(pairs, lines)}
+        return {pair_for[p]: (line or None) for p, line in results}
 
     def _merge_bases_git(self, gitdir, pairs, pair_for, workers=None):
         from concurrent.futures import ThreadPoolExecutor, as_completed
