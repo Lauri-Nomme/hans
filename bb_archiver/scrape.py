@@ -45,6 +45,7 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -225,7 +226,7 @@ def _scrape_prs_parallel(base, auth, rest_path, todo, total, out, ckpt_path,
 
 
 def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
-          checkpoint=True, http=None, pr_workers=1):
+          checkpoint=True, http=None, pr_workers=1, sha_batch=50, sha_workers=1):
     out = Path(out)
     (out / "rest").mkdir(parents=True, exist_ok=True)
     api = Api(base, (user, password))
@@ -331,7 +332,8 @@ def crawl(base, user, password, project, repo, out, git_dir=None, limit_prs=0,
         # retained under a refs/keep/<sha> ref so repack does not drop them.
         needed_refs.extend(_harvest_activity_shas(out, prs, project, repo))
         fetch_mirror(git_dir, base, user, password, project, repo, index,
-                     needed_refs=needed_refs)
+                     needed_refs=needed_refs, fetch_batch=sha_batch,
+                     sha_workers=sha_workers)
 
     (out / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
     return index
@@ -456,6 +458,30 @@ def _available_objects(git_dir, git="git"):
     return {line.strip() for line in p.stdout.splitlines() if line.strip()}
 
 
+# Flags for every SHA-fetch. Several fetches may run concurrently in one repo:
+# --no-write-fetch-head stops them clobbering FETCH_HEAD, and disabling auto
+# maintenance stops a mid-loop gc from pruning the fetched-but-unreferenced
+# objects (refs are only written after the whole SHA-fetch loop).
+_SHA_FETCH_FLAGS = ["-c", "gc.auto=0", "-c", "maintenance.auto=false"]
+_SHA_FETCH_ARGS = ["fetch", "--no-write-fetch-head", "origin"]
+# Per-SHA attempts before a SHA is declared unfetchable: under parallel load a
+# transient failure (throttling, reset) must not silently drop an object.
+_SHA_FETCH_ATTEMPTS = 3
+
+
+def _fetch_one_sha(git_dir, auth, sha, git="git", attempts=_SHA_FETCH_ATTEMPTS):
+    """Fetch a single SHA with retry+backoff. Returns (ok, last_stderr)."""
+    rr = None
+    for attempt in range(attempts):
+        rr = subprocess.run([git, *_SHA_FETCH_FLAGS, *auth, *_SHA_FETCH_ARGS, sha],
+                            cwd=git_dir, capture_output=True)
+        if rr.returncode == 0:
+            return True, ""
+        if attempt + 1 < attempts:
+            time.sleep(4 ** attempt)
+    return False, rr.stderr.decode("utf-8", "replace").strip()
+
+
 def _fetch_objects_batch(git_dir, auth, shas, batch_limit=5, git="git"):
     """SHA-fetch `shas` from origin, tolerating unfetchable ones.
 
@@ -463,28 +489,27 @@ def _fetch_objects_batch(git_dir, auth, shas, batch_limit=5, git="git"):
     serve (e.g. a commit that was GC'd on the source, only referenced by a
     long-gone PR) aborts the whole batch with exit 128. On failure we log git's
     stderr, recursively split and retry both halves, and bottom out per-SHA
-    (<= batch_limit) warning-and-skipping the genuinely unfetchable ones.
+    (<= batch_limit) warning-and-skipping the genuinely unfetchable ones (only
+    after retrying each, so transient errors are not mistaken for GC'd objects).
 
     Returns the list of SHAs successfully fetched.
     """
     if not shas:
         return []
-    r = subprocess.run([git, *auth, "fetch", "origin", *shas],
+    r = subprocess.run([git, *_SHA_FETCH_FLAGS, *auth, *_SHA_FETCH_ARGS, *shas],
                        cwd=git_dir, capture_output=True)
     if r.returncode == 0:
         return list(shas)
     if len(shas) <= batch_limit:
-        ok, bad = [], []
+        ok = []
         for s in shas:
-            rr = subprocess.run([git, *auth, "fetch", "origin", s],
-                                cwd=git_dir, capture_output=True)
-            if rr.returncode == 0:
+            fetched, err = _fetch_one_sha(git_dir, auth, s, git)
+            if fetched:
                 ok.append(s)
             else:
-                bad.append(s)
                 _log(f"git mirror: warning: object {s} could not be fetched "
                      f"from the source (GC'd / no longer served): "
-                     f"{rr.stderr.strip()[:160]}")
+                     f"{err[:160]}")
         return ok
     _log(f"git mirror: sha-fetch batch failed on {len(shas)} shas — splitting")
     mid = len(shas) // 2
@@ -625,7 +650,7 @@ def _apply_refs_batch(git_dir, refs, batch_limit=10, git="git"):
 
 
 def fetch_mirror(git_dir, base, user, password, project, repo, index,
-                 needed_refs=(), fetch_batch=50, git="git"):
+                 needed_refs=(), fetch_batch=50, sha_workers=1, git="git"):
     """Build the bare mirror + guarantee object completeness.
 
     Sub-phases (in order):
@@ -670,17 +695,25 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
              f"(Bitbucket hides refs/stash-refs/*)")
         t0 = time.time()
         fetched = []
-        for i in range(0, len(shas), fetch_batch):
-            batch = shas[i:i + fetch_batch]
-            fetched.extend(_fetch_objects_batch(git_dir, auth, batch, git=git))
-            done = min(i + fetch_batch, len(shas))
-            el = time.time() - t0
-            rate = done / max(el, 0.001)
-            eta = (len(shas) - done) / max(rate, 1)
-            pct = done / len(shas) * 100
-            _log(f"git mirror: sha-fetch {done}/{len(shas)} "
-                 f"({pct:4.1f}%, {rate:,.1f}/s, "
-                 f"ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
+        batches = [shas[i:i + fetch_batch]
+                   for i in range(0, len(shas), fetch_batch)]
+        done = 0
+        # Sequential at sha_workers=1 (the original behaviour); otherwise the
+        # batches run on a thread pool (each is an independent `git fetch`
+        # subprocess). Progress is aggregated and logged here, in one thread.
+        with ThreadPoolExecutor(max_workers=max(1, sha_workers)) as pool:
+            futures = {pool.submit(_fetch_objects_batch, git_dir, auth, b, git=git): b
+                       for b in batches}
+            for fut in as_completed(futures):
+                fetched.extend(fut.result())
+                done += len(futures[fut])
+                el = time.time() - t0
+                rate = done / max(el, 0.001)
+                eta = (len(shas) - done) / max(rate, 1)
+                pct = done / len(shas) * 100
+                _log(f"git mirror: sha-fetch {done}/{len(shas)} "
+                     f"({pct:4.1f}%, {rate:,.1f}/s, "
+                     f"ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
         if len(fetched) < len(shas):
             _log(f"git mirror: {len(shas) - len(fetched)} object(s) could not "
                  f"be fetched (GC'd / no longer served on the source)")
@@ -741,11 +774,16 @@ def main():
     ap.add_argument("--no-resume", action="store_true")
     ap.add_argument("--pr-workers", type=int, default=4,
                     help="parallel workers for PR detail+activities fetch (default 4)")
+    ap.add_argument("--sha-batch", type=int, default=50,
+                    help="SHAs per `git fetch` in the SHA-fetch phase (default 50)")
+    ap.add_argument("--sha-workers", type=int, default=1,
+                    help="parallel `git fetch` processes in the SHA-fetch phase (default 1)")
     args = ap.parse_args()
     index = crawl(args.base, args.user, args.password, args.project, args.repo, args.out,
                   git_dir=None if args.no_git else os.path.join(args.out, "git"),
                   limit_prs=args.limit_prs, checkpoint=not args.no_resume,
-                  pr_workers=args.pr_workers)
+                  pr_workers=args.pr_workers, sha_batch=args.sha_batch,
+                  sha_workers=args.sha_workers)
     _log(f"scraped {index['project']}/{index['repo']} -> {args.out}")
 
 
