@@ -65,6 +65,35 @@ def sha(n):
     return "%040x" % n
 
 
+class GoneShasTest(unittest.TestCase):
+    """_gone_shas parses git's real 'not our ref <sha>' batch error."""
+
+    def test_empty_or_missing_stderr(self):
+        self.assertEqual(scrape._gone_shas(b""), set())
+        self.assertEqual(scrape._gone_shas(None), set())
+
+    def test_two_line_real_stderr_is_deduped(self):
+        # git emits the refusal twice per fetch (upload-pack + remote error);
+        # the set must dedupe so on_gone fires once per sha.
+        stderr = (b"fatal: git upload-pack: not our ref " + sha(1).encode() + b"\n"
+                  b"fatal: remote error: upload-pack: not our ref " + sha(1).encode() + b"\n")
+        self.assertEqual(scrape._gone_shas(stderr), {sha(1)})
+
+    def test_multiple_distinct_shas(self):
+        stderr = (b"fatal: remote error: upload-pack: not our ref " + sha(1).encode() + b"\n"
+                  b"fatal: remote error: upload-pack: not our ref " + sha(2).encode() + b"\n")
+        self.assertEqual(scrape._gone_shas(stderr), {sha(1), sha(2)})
+
+    def test_abbreviated_sha_fails_closed(self):
+        # a short / non-40-hex sha does not match -> falls through to bisection
+        self.assertEqual(
+            scrape._gone_shas(b"fatal: remote error: upload-pack: not our ref abc123\n"),
+            set())
+
+    def test_non_gone_stderr_is_empty(self):
+        self.assertEqual(scrape._gone_shas(b"fatal: connection reset\n"), set())
+
+
 class FetchBatchTest(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.object(scrape.time, "sleep")
@@ -178,6 +207,17 @@ class FetchMirrorTest(unittest.TestCase):
         self.fetch_mirror(git, self.needed(1, 2))
         with open(self.skip_path, encoding="utf-8") as f:
             self.assertEqual(f.read().split(), [sha(2)])
+
+    def test_gone_recorded_exactly_once_under_parallel_workers(self):
+        # 20 refs split across 4 workers; several gone -> each recorded once
+        gone_shas = [sha(2), sha(5), sha(9), sha(14)]
+        git = FakeGit({s: ["gone"] * 5 for s in gone_shas})
+        self.fetch_mirror(git, self.needed(*range(1, 21)),
+                          sha_workers=4, fetch_batch=5)
+        with open(self.skip_path, encoding="utf-8") as f:
+            recorded = f.read().split()
+        self.assertEqual(sorted(recorded), sorted(gone_shas))
+        self.assertEqual(len(recorded), len(set(recorded)), "no duplicates")
 
     def test_second_run_skips_listed_shas(self):
         with open(self.skip_path, "w", encoding="utf-8") as f:
