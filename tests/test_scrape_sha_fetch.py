@@ -82,10 +82,20 @@ class FetchBatchTest(unittest.TestCase):
         self.assertEqual(sorted(got), [sha(1), sha(2)])
         self.assertEqual(len(git.single_calls(sha(2))), 2)
 
+    def test_not_our_ref_is_not_retried_and_reported_gone(self):
+        git = FakeGit({sha(2): ["gone", "gone", "gone"]})
+        gone = []
+        got = self.run_batch(git, [sha(1), sha(2)], on_gone=gone.append)
+        self.assertEqual(got, [sha(1)])
+        self.assertEqual(gone, [sha(2)])
+        self.assertEqual(len(git.single_calls(sha(2))), 1)
+
     def test_other_failures_retry_a_bounded_number_of_times(self):
         git = FakeGit({sha(2): ["err"] * 10})
-        got = self.run_batch(git, [sha(2)])
+        gone = []
+        got = self.run_batch(git, [sha(2)], on_gone=gone.append)
         self.assertEqual(got, [])
+        self.assertEqual(gone, [], "a transient error is not 'gone'")
         # one batch attempt, then _SHA_FETCH_ATTEMPTS per-SHA attempts
         self.assertEqual(len(git.single_calls(sha(2))),
                          1 + scrape._SHA_FETCH_ATTEMPTS)
@@ -120,6 +130,7 @@ class FetchMirrorTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.git_dir = os.path.join(tmp.name, "mirror.git")
         os.makedirs(os.path.join(self.git_dir, "objects"))
+        self.skip_path = os.path.join(tmp.name, "unfetchable.txt")
         self.present = set()
 
     def fetch_mirror(self, git, needed, **kw):
@@ -133,10 +144,32 @@ class FetchMirrorTest(unittest.TestCase):
                 mock.patch.object(scrape, "_log"):
             return scrape.fetch_mirror(self.git_dir, "https://bb.example", "u",
                                        "p", "PRJ", "repo", None,
-                                       needed_refs=needed, **kw)
+                                       needed_refs=needed,
+                                       skip_path=self.skip_path, **kw)
 
     def needed(self, *nums):
         return [("refs/stash-refs/%d" % n, sha(n)) for n in nums]
+
+    def test_gone_objects_are_recorded_and_do_not_fail_the_run(self):
+        git = FakeGit({sha(2): ["gone"] * 5})
+        self.fetch_mirror(git, self.needed(1, 2))
+        with open(self.skip_path, encoding="utf-8") as f:
+            self.assertEqual(f.read().split(), [sha(2)])
+
+    def test_second_run_skips_listed_shas(self):
+        with open(self.skip_path, "w", encoding="utf-8") as f:
+            f.write(sha(2) + "\n")
+        git = FakeGit()
+        self.fetch_mirror(git, self.needed(1, 2))
+        asked = {s for _, shas in git.calls for s in shas}
+        self.assertEqual(asked, {sha(1)})
+
+    def test_nothing_is_fetched_when_every_sha_is_listed(self):
+        with open(self.skip_path, "w", encoding="utf-8") as f:
+            f.write(sha(1) + "\n" + sha(2) + "\n")
+        git = FakeGit()
+        self.fetch_mirror(git, self.needed(1, 2))
+        self.assertEqual(git.calls, [])
 
     def test_default_is_sequential_in_sorted_batches_of_50(self):
         git = FakeGit()
