@@ -42,6 +42,7 @@ Output layout (consumed by `assemble`):
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -489,6 +490,19 @@ def _fetch_one_sha(git_dir, auth, sha, git="git", attempts=_SHA_FETCH_ATTEMPTS):
 
 
 _GONE_MARKER = "not our ref"
+_GONE_RE = re.compile(rb"not our ref ([0-9a-f]{40})")
+
+
+def _gone_shas(stderr):
+    """SHAs the server refused with 'not our ref' in this stderr.
+
+    git names the object it cannot serve in the batch error
+    ('fatal: remote error: upload-pack: not our ref <sha>'), so a batch that
+    fails only because of GC'd objects can be retried with exactly those
+    removed — no bisection, no re-requesting the good SHAs."""
+    if not stderr:
+        return set()
+    return {m.group(1).decode("ascii") for m in _GONE_RE.finditer(stderr)}
 
 
 def _read_skip_list(path):
@@ -519,6 +533,21 @@ def _fetch_objects_batch(git_dir, auth, shas, batch_limit=5, git="git",
                        cwd=git_dir, capture_output=True)
     if r.returncode == 0:
         return list(shas)
+    # Fast path: the server names objects it will never serve in the batch
+    # error ('not our ref <sha>'). Exclude exactly those and retry the rest as
+    # one batch — bisection would re-request every good SHA ~log2(n) times per
+    # gone SHA. Recurses once per distinct gone SHA (git names the first one it
+    # hits per fetch).
+    gone = _gone_shas(r.stderr) & set(shas)
+    if gone:
+        for s in sorted(gone):
+            if on_gone is not None:
+                on_gone(s)
+        remaining = [s for s in shas if s not in gone]
+        if not remaining:
+            return []
+        return _fetch_objects_batch(git_dir, auth, remaining, batch_limit, git,
+                                    on_gone)
     if len(shas) <= batch_limit:
         ok = []
         for s in shas:
