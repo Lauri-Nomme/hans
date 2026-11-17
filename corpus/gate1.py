@@ -15,6 +15,7 @@ Exit 0 = no genuine differences; 1 = genuine differences found.
 import gzip
 import io
 import json
+import re
 import sys
 import tarfile
 from collections import OrderedDict
@@ -22,10 +23,10 @@ from collections import OrderedDict
 PR_IDS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 
 
-def _decomp(tf, name):
-    f = tf.extractfile(name)
+def _decomp(tf, member):
+    f = tf.extractfile(member)
     data = f.read() if f else b""
-    if name.endswith(".gz"):
+    if member.name.endswith(".gz"):
         return gzip.decompress(data)
     return data
 
@@ -107,7 +108,11 @@ class Report:
 def compare(real_archive, syn_archive, report):
     real = tarfile.open(real_archive)
     syn = tarfile.open(syn_archive)
-    rn, sn = set(real.getnames()), set(syn.getnames())
+    # Index members by name once: extracting by name makes TarFile.getmember
+    # reverse-scan the member list per call (quadratic in the entry count).
+    real_members = {m.name: m for m in real.getmembers()}
+    syn_members = {m.name: m for m in syn.getmembers()}
+    rn, sn = set(real_members), set(syn_members)
     if rn != sn:
         report.fail(f"tar listings differ: only-real={sorted(rn - sn)} "
                     f"only-syn={sorted(sn - rn)}")
@@ -115,7 +120,7 @@ def compare(real_archive, syn_archive, report):
     report.note(f"tar listings identical ({len(rn)} entries)")
 
     for name in sorted(rn):
-        a, b = _decomp(real, name), _decomp(syn, name)
+        a, b = _decomp(real, real_members[name]), _decomp(syn, syn_members[name])
         if a == b:
             continue
         if name.endswith(".tar"):  # git objects
@@ -332,16 +337,26 @@ def _list_item_diff(x, y, report, jsonpath, itempath):
             report.fail(f"{jsonpath}{itempath}: {x!r} != {y!r}")
 
 
-def load_activities(archive, pid):
-    """Load a PR's activities.json from an export archive (find the repo id)."""
-    import re
+def load_activities_all(archive, pids):
+    """Load every wanted PR's activities.json in a single pass over the archive.
+
+    The per-PR helper that preceded this reopened the archive and rescanned all
+    member names for each PR id — O(pids x entries). One pass, indexed by the
+    PR id in the 'pullrequest/<pid>/activities.json.atl.gz' path, is linear."""
+    wanted = set(pids)
+    out = {}
     with tarfile.open(archive) as t:
-        for name in t.getnames():
-            if re.search(rf"pullrequest/{pid}/activities\.json\.atl\.gz$", name):
-                data = t.extractfile(name)
-                if data:
-                    return json.loads(gzip.decompress(data.read()))
-    return None
+        for m in t.getmembers():
+            mm = re.search(r"pullrequest/(\d+)/activities\.json\.atl\.gz$", m.name)
+            if not mm:
+                continue
+            pid = int(mm.group(1))
+            if pid not in wanted or pid in out:
+                continue
+            f = t.extractfile(m)
+            if f:
+                out[pid] = json.loads(gzip.decompress(f.read()))
+    return out
 
 
 def main():
@@ -353,8 +368,8 @@ def main():
     args = ap.parse_args()
     r = Report()
     compare(args.real, args.syn, r)
-    real_acts = {pid: load_activities(args.real, pid) for pid in PR_IDS}
-    syn_acts = {pid: load_activities(args.syn, pid) for pid in PR_IDS}
+    real_acts = load_activities_all(args.real, PR_IDS)
+    syn_acts = load_activities_all(args.syn, PR_IDS)
     check_tasks(real_acts, syn_acts, r)
     print("=== Gate 1 semantic diff ===")
     for n in r.notes:
