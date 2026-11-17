@@ -22,7 +22,8 @@ def cmd_scrape(args):
                   args.out,
                   git_dir=None if args.no_git else str(Path(args.out) / "git"),
                   limit_prs=args.limit_prs, checkpoint=not args.no_resume,
-                  pr_workers=args.pr_workers)
+                  pr_workers=args.pr_workers, sha_batch=args.sha_batch,
+                  sha_workers=args.sha_workers)
     _log(f"scraped {args.project}/{args.repo} -> {args.out} "
          f"(project_id={index['project_id']} repo_id={index['repo_id']})")
 
@@ -288,6 +289,10 @@ def main(argv=None):
                    help="ignore the checkpoint and scrape all PRs")
     s.add_argument("--pr-workers", type=int, default=4,
                    help="parallel workers for PR detail+activities fetch (default 4)")
+    s.add_argument("--sha-batch", type=int, default=50,
+                   help="SHAs per `git fetch` in the SHA-fetch phase (default 50)")
+    s.add_argument("--sha-workers", type=int, default=1,
+                   help="parallel `git fetch` processes in the SHA-fetch phase (default 1)")
     s.set_defaults(fn=cmd_scrape)
 
     a = sub.add_parser("assemble")
