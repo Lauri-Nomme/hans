@@ -4,6 +4,7 @@ Consumes the scrape dir produced by `scrape.py` and exposes plain dicts that
 `emit.py` serializes into archive files. All decisions recorded as warnings.
 """
 import json
+import threading
 from collections import OrderedDict
 from pathlib import Path
 
@@ -21,6 +22,7 @@ class Model:
         self.warnings = []
         self._cache = {}
         self._warned_slugs = set()
+        self._warn_lock = threading.Lock()
 
     # -- load raw dumps -----------------------------------------------------
     def _load(self, name):
@@ -128,16 +130,19 @@ class Model:
         A slug that harvest_users did not find is never substituted with
         another user: it is synthesized as 'slug|slug||NORMAL' (matching how
         the Bitbucket import renders stub users) and recorded as a warning so
-        it surfaces in the assemble report."""
+        it surfaces in the assemble report. The fast path is lock-free so
+        parallel emission stays cheap; only the rare unknown-slug warning is
+        guarded."""
         u = self.users.get(user_slug)
         if u is not None:
             return f"{u['slug']}|{u['displayName']}||{u.get('type', 'NORMAL')}"
-        if user_slug not in self._warned_slugs:
-            self._warned_slugs.add(user_slug)
-            self.warnings.append(
-                f"unknown user slug {user_slug!r}: not present in any "
-                f"harvestable field — synthesized archive id "
-                f"'{user_slug}|{user_slug}||NORMAL'")
+        with self._warn_lock:
+            if user_slug not in self._warned_slugs:
+                self._warned_slugs.add(user_slug)
+                self.warnings.append(
+                    f"unknown user slug {user_slug!r}: not present in any "
+                    f"harvestable field — synthesized archive id "
+                    f"'{user_slug}|{user_slug}||NORMAL'")
         return f"{user_slug}|{user_slug}||NORMAL"
 
 

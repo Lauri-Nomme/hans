@@ -14,6 +14,7 @@ import tempfile
 import time
 import zlib
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import jsonwriter as jw
@@ -41,7 +42,7 @@ class Emitter:
     def __init__(self, model, app_version="9.4.18", build_version="9004018",
                  instance_name="Bitbucket", node_id=None, export_mtime=None,
                  obj_tar_bin=None, obj_tar_chunks=0, merge_base_bin=None,
-                 keep_tag_prefix=None):
+                 keep_tag_prefix=None, pr_workers=0):
         self.m = model
         self.app_version = app_version
         self.build_version = build_version
@@ -54,6 +55,7 @@ class Emitter:
         self.obj_tar_bin = obj_tar_bin
         self.obj_tar_chunks = int(obj_tar_chunks or 0)
         self.merge_base_bin = merge_base_bin
+        self.pr_workers = int(pr_workers or 0)
         # EXPERIMENTAL (breaks fidelity): emit refs/tags/<prefix><sha> for every
         # refs/keep/<sha> in the scrape mirror, so force-pushed-away commits
         # become reachable on GH via real tags. Default None = faithful archive.
@@ -651,6 +653,15 @@ class Emitter:
         return out_path
 
     # ---------------- assemble --------------------------------------------
+    def _emit_pr(self, pr, base):
+        """Build the three per-PR archive buffers (metadata/activities/caches).
+
+        Pure CPU work in jsonwriter; called from the worker pool so the
+        emission phase scales across cores. Returns (metadata_gz, activities_gz,
+        cache_gz) bytes."""
+        return (self.pr_metadata(pr), self.pr_activities(pr),
+                self.pr_cache(pr, base))
+
     def assemble(self, out_path):
         objtar = tempfile.NamedTemporaryFile(prefix="objects-", suffix=".tar",
                                              delete=False)
@@ -703,22 +714,36 @@ class Emitter:
                 _log(f"archive: writing {total} pull requests")
                 _log("archive: precomputing merge-bases")
                 bases = self._merge_bases(prs)
+                # Pre-warm the PR detail dumps (pr_cache's fromTip fallback
+                # reads self.m.pr) so the parallel emission only does read-only
+                # cache hits; activities/prs are already loaded by harvest.
+                for pr in prs:
+                    self.m.pr(pr["id"])
+                workers = self.pr_workers or min(os.cpu_count() or 4, 8)
+                chunk = max(workers * 2, 1)
                 t0 = time.time()
-                for i, pr in enumerate(prs, 1):
-                    pid = pr["id"]
-                    add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/metadata.json.atl.gz",
-                        self.pr_metadata(pr))
-                    add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/activities.json.atl.gz",
-                        self.pr_activities(pr))
-                    add(f"{GITPR}/repositories/{self.rid}/pullrequests/{pid}/caches.atl.tar.atl.gz",
-                        self.pr_cache(pr, bases.get(pid)))
-                    if i % 25 == 0 or i == total:
-                        el = time.time() - t0
-                        rate = i / max(el, 0.001)
-                        eta = (total - i) / max(rate, 1)
-                        pct = i / total * 100
-                        _log(f"PR {i}/{total} done "
-                             f"({pct:4.1f}%, {rate:,.1f}/s, ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
+                i = 0
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    for start in range(0, total, chunk):
+                        group = prs[start:start + chunk]
+                        group_bases = [bases.get(p["id"]) for p in group]
+                        for pr, (meta, acts, cache) in zip(
+                                group, pool.map(self._emit_pr, group, group_bases)):
+                            pid = pr["id"]
+                            i += 1
+                            add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/metadata.json.atl.gz",
+                                meta)
+                            add(f"{META}_pullRequests/repository/{self.rid}/pullrequest/{pid}/activities.json.atl.gz",
+                                acts)
+                            add(f"{GITPR}/repositories/{self.rid}/pullrequests/{pid}/caches.atl.tar.atl.gz",
+                                cache)
+                            if i % 25 == 0 or i == total:
+                                el = time.time() - t0
+                                rate = i / max(el, 0.001)
+                                eta = (total - i) / max(rate, 1)
+                                pct = i / total * 100
+                                _log(f"PR {i}/{total} done "
+                                     f"({pct:4.1f}%, {rate:,.1f}/s, ETA {int(eta)//3600}:{int(eta)%3600//60:02d}:{int(eta)%60:02d})")
                 add(f"_/repository/hierarchy_end/{self.hid}", b"")
             self._write_warnings(out_path)
             _log(f"assembled {out_path}")

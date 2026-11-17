@@ -46,7 +46,8 @@ def cmd_assemble(args):
                  export_mtime=args.mtime, obj_tar_bin=args.obj_tar_bin,
                  obj_tar_chunks=args.obj_tar_chunks,
                  merge_base_bin=args.merge_base_bin,
-                 keep_tag_prefix=args.keep_tag_prefix)
+                 keep_tag_prefix=args.keep_tag_prefix,
+                 pr_workers=args.pr_workers)
     out = em.assemble(args.out)
     n = sum(1 for _ in tarfile.open(out))
     _log_archive(f"archive complete: {n} entries")
@@ -317,6 +318,9 @@ def main(argv=None):
                         "refs/tags/<prefix><sha> for every refs/keep/<sha> in the "
                         "scrape mirror, so force-pushed-away commits become "
                         "reachable on GH via real tags")
+    a.add_argument("--pr-workers", type=int, default=0,
+                   help="parallel workers for per-PR emission (default 0 = "
+                        "auto, min(cpu_count, 8); 1 = serial)")
     a.set_defaults(fn=cmd_assemble)
 
     v = sub.add_parser("validate")
