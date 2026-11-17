@@ -342,17 +342,21 @@ def load_activities_all(archive, pids):
 
     The per-PR helper that preceded this reopened the archive and rescanned all
     member names for each PR id — O(pids x entries). One pass, indexed by the
-    PR id in the 'pullrequest/<pid>/activities.json.atl.gz' path, is linear."""
+    PR id in the 'pullrequest/<pid>/activities.json.atl.gz' path, is linear.
+    A duplicated member name resolves to the LAST occurrence, matching the old
+    getmember(name) reverse-scan."""
     wanted = set(pids)
-    out = {}
+    members = {}
     with tarfile.open(archive) as t:
         for m in t.getmembers():
             mm = re.search(r"pullrequest/(\d+)/activities\.json\.atl\.gz$", m.name)
             if not mm:
                 continue
             pid = int(mm.group(1))
-            if pid not in wanted or pid in out:
-                continue
+            if pid in wanted:
+                members[pid] = m  # last-wins (getmember reverse-scans)
+        out = {}
+        for pid, m in members.items():
             f = t.extractfile(m)
             if f:
                 out[pid] = json.loads(gzip.decompress(f.read()))
