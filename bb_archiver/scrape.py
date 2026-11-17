@@ -681,7 +681,7 @@ def fetch_mirror(git_dir, base, user, password, project, repo, index,
          did NOT already obtain (Bitbucket hides refs/stash-refs/* but still
          serves arbitrary objects by SHA).
       3. `git update-ref` the fetched SHAs so they are *reachable* — otherwise
-         `git repack -adf` in the emitter would treat them as dangling and drop
+         `git repack -ad` in the emitter would treat them as dangling and drop
          them from the object store.
     """
     git_dir = str(git_dir)
