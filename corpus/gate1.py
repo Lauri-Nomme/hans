@@ -108,6 +108,14 @@ class Report:
 def compare(real_archive, syn_archive, report):
     real = tarfile.open(real_archive)
     syn = tarfile.open(syn_archive)
+    try:
+        _compare(real, syn, report)
+    finally:
+        real.close()
+        syn.close()
+
+
+def _compare(real, syn, report):
     # Index members by name once: extracting by name makes TarFile.getmember
     # reverse-scan the member list per call (quadratic in the entry count).
     real_members = {m.name: m for m in real.getmembers()}
