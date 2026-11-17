@@ -201,6 +201,14 @@ class ValidateVerdicts(unittest.TestCase):
             "repo 1: unparseable JSON "
             "x/repositories/1/pullRequests/9/bad.json.atl.gz"])
 
+    def test_corrupt_gzip_body_is_a_problem_not_a_crash(self):
+        bad = gzip.compress(b'{"a": 1}' * 50)[:-12]
+        got = self.problems(extra=[(
+            "x/repositories/1/pullRequests/9/cut.json.atl.gz", bad)])
+        self.assertEqual(got, [
+            "repo 1: unparseable JSON "
+            "x/repositories/1/pullRequests/9/cut.json.atl.gz"])
+
     def test_repository_without_repositories_path_skips_ref_check(self):
         # "/repository/1/..." (singular) is a repo too, but its refs are not
         # checked; PR json citations still are
@@ -241,6 +249,25 @@ class ValidateVerdicts(unittest.TestCase):
         got = run(self.path)
         self.assertEqual(len(got), 1)
         self.assertTrue(got[0].startswith("repo 2: ref refs/heads/main"))
+
+
+class ValidateScaling(unittest.TestCase):
+    """Reading entries by name made validate quadratic in the entry count
+    (getmember scans from the end): 563k entries took hours."""
+
+    def timed(self, n):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.tar")
+            build(path, prs=[(i, i % 50) for i in range(n)])
+            t = time.perf_counter()
+            self.assertEqual(run(path), [])
+            return time.perf_counter() - t
+
+    def test_time_grows_linearly_with_entries(self):
+        small = self.timed(2500)
+        large = self.timed(10000)
+        self.assertLess(large, 8 * small + 0.3,
+                        f"2500 entries {small:.2f}s, 10000 entries {large:.2f}s")
 
 
 if __name__ == "__main__":

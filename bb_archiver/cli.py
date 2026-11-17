@@ -8,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import zlib
 from pathlib import Path
 
 from . import jsonwriter as jw
@@ -134,6 +135,64 @@ def _present_objects(fileobj, wanted):
     return found
 
 
+_REPO_RE = re.compile(r"/repositor(?:y|ies)/([^/]+)/")
+_REPOSITORIES_RE = re.compile(r"/repositories/([^/]+)/")
+
+
+def _scan_outer(archive):
+    """One streaming pass over the outer archive.
+
+    Returns (gzip problems, per-repo info). Entries are read through their
+    TarInfo, never by name: TarFile.getmember(name) scans the member list from
+    the end, so reading each of the ~560k entries of a big archive by name
+    cost hours (quadratic). Every .gz is read once, for the gzip magic check;
+    PR json is parsed in the same read. TarFile.members is cleared as we go so
+    memory does not grow with the entry count. Per repo: the metadata and
+    objects tar members (the last one seen, as a by-name lookup would find),
+    PR json count, unparseable PR json names and the cited (json name, sha)."""
+    gz_problems = []
+    repos = {}
+    while True:
+        m = archive.next()
+        if m is None:
+            break
+        archive.members = []
+        name = m.name
+        rm = _REPO_RE.search(name)
+        r = None
+        if rm:
+            r = repos.setdefault(rm.group(1), {
+                "meta": None, "objs": None, "n_jsons": 0, "bad_jsons": [],
+                "cited": [], "has_repositories": False})
+            if _REPOSITORIES_RE.search(name):
+                r["has_repositories"] = True
+        data = None
+        if name.endswith(".gz"):
+            f = archive.extractfile(m)
+            data = f.read() if f else b""
+            if data[:2] != b"\x1f\x8b":
+                gz_problems.append(f"{name}: not gzip")
+                data = None
+        if r is None:
+            continue
+        if name.endswith("metadata.atl.tar.atl.gz"):
+            r["meta"] = m
+        elif name.endswith("objects.atl.tar"):
+            r["objs"] = m
+        elif name.endswith(".json.atl.gz") and (
+                "pullRequests/" in name or name.endswith("pullrequests.json.atl.gz")):
+            r["n_jsons"] += 1
+            if data is None:
+                continue  # not gzip: reported above
+            try:
+                obj = json.loads(gzip.decompress(data))
+            except Exception:
+                r["bad_jsons"].append(name)
+                continue
+            r["cited"].extend((name, sha) for sha in sorted(set(_iter_json_hex_shas(obj))))
+    return gz_problems, repos
+
+
 def _check_object_integrity(archive, problems):
     """Every object the archive references must exist in the repo's
     objects.atl.tar, in one pass over the object tar's headers.
@@ -151,22 +210,8 @@ def _check_object_integrity(archive, problems):
     object is missing, GEI fails the review thread with
     REVIEW_THREAD_MISSING_START_COMMIT_OID.
     """
-    repos = {}
-    for name in archive.getnames():
-        m = re.search(r"/repositor(?:y|ies)/([^/]+)/", name)
-        if not m:
-            continue
-        r = repos.setdefault(m.group(1), {"meta": None, "objs": None,
-                                          "jsons": [], "has_repositories": False})
-        if re.search(r"/repositories/([^/]+)/", name):
-            r["has_repositories"] = True
-        if name.endswith("metadata.atl.tar.atl.gz"):
-            r["meta"] = name
-        elif name.endswith("objects.atl.tar"):
-            r["objs"] = name
-        elif name.endswith(".json.atl.gz") and (
-                "pullRequests/" in name or name.endswith("pullrequests.json.atl.gz")):
-            r["jsons"].append(name)
+    gz_problems, repos = _scan_outer(archive)
+    problems.extend(gz_problems)
     for rid, r in repos.items():
         check_refs = r["has_repositories"]
         if check_refs and (r["meta"] is None or r["objs"] is None):
@@ -174,29 +219,27 @@ def _check_object_integrity(archive, problems):
                             f"objects.atl.tar in archive")
             check_refs = False
         if r["objs"] is None:
-            if r["jsons"]:
+            if r["n_jsons"]:
                 problems.append(f"repo {rid}: missing objects.atl.tar in archive")
             continue
         refs = []  # (refname, sha)
         if check_refs:
             f = archive.extractfile(r["meta"])
-            for refname, content in _inner_map(gzip.decompress(f.read()) if f else b"").items():
+            try:
+                meta = _inner_map(gzip.decompress(f.read()) if f else b"")
+            except (OSError, EOFError, zlib.error, tarfile.TarError):
+                problems.append(f"repo {rid}: unreadable {r['meta'].name}")
+                meta = {}
+            for refname, content in meta.items():
                 if not (refname.startswith("refs/") or
                         refname.startswith("stash-refs/")):
                     continue
                 sha = content.decode("utf-8", "replace").strip()
                 if sha:
                     refs.append((refname, sha))
-        cited = []  # (json name, sha)
-        for jname in r["jsons"]:
-            f = archive.extractfile(jname)
-            data = gzip.decompress(f.read()) if f else b""
-            try:
-                obj = json.loads(data)
-            except Exception:
-                problems.append(f"repo {rid}: unparseable JSON {jname}")
-                continue
-            cited.extend((jname, sha) for sha in sorted(set(_iter_json_hex_shas(obj))))
+        for jname in r["bad_jsons"]:
+            problems.append(f"repo {rid}: unparseable JSON {jname}")
+        cited = r["cited"]  # (json name, sha)
         # Keep the seekable ExFileObject (never a buffered read of the tar).
         present = _present_objects(
             archive.extractfile(r["objs"]),
@@ -219,16 +262,7 @@ def cmd_validate(args):
     (every ref in metadata.atl.tar must resolve to an object in objects.atl.tar)."""
     problems = []
     with tarfile.open(args.archive) as tar:
-        names = tar.getnames()
-        for name in names:
-            if name.endswith(".gz"):
-                f = tar.extractfile(name)
-                data = f.read() if f else b""
-                if data[:2] != b"\x1f\x8b":
-                    problems.append(f"{name}: not gzip")
-            elif name.endswith(".tar"):
-                pass
-        _check_object_integrity(tar, problems)
+        _check_object_integrity(tar, problems)  # includes the gzip header check
     _log(f"validated {args.archive}: {len(problems)} problems")
     for p in problems:
         print("  ", p)
