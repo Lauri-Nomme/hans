@@ -57,7 +57,7 @@ bb-archiver validate  -> schema self-check of the tar
     emoji as uppercase surrogate `\uXXXX` escapes, no trailing newlines
   - bare-repo skeleton (HEAD, config, refs/heads, refs/tags, PR refs +
     stash-refs + reflogs)
-  - loose git objects via `git repack -adf` + `unpack-objects`
+  - loose git objects via `git repack -ad` + `unpack-objects`
   - PR metadata (from REST fields) and activities (derived from REST activity
     stream via the mapping table in `FORMAT_SPEC.md §7`)
   - PR caches (`cached-ancestor.txt` = fromTip,toTip,mergeBase)
