@@ -210,7 +210,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    // Locate the single pack produced by `git repack -adf`.
+    // Locate the single pack produced by `git repack -ad`.
     let packdir = gitdir.join("objects").join("pack");
     let mut packs: Vec<PathBuf> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&packdir) {
@@ -223,13 +223,13 @@ fn main() {
     }
     if packs.len() > 1 {
         // read_dir order is unspecified, so picking packs[0] could silently
-        // emit a partial object set. The emitter's `git repack -adf` leaves
+        // emit a partial object set. The emitter's `git repack -ad` leaves
         // exactly one idx; anything else (a .keep'ed older pack, crash
         // debris) is ambiguous and must fail loudly instead.
         eprintln!(
             "refusing to guess: {} pack idx files in {} — the object set would \
              depend on read_dir order. Remove the stale pack/idx or run \
-             `git repack -adf` in the mirror first.",
+             `git repack -ad` in the mirror first.",
             packs.len(),
             packdir.display()
         );

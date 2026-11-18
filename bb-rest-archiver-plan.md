@@ -184,7 +184,7 @@ Phase 3 complete:
       metadata/activities, compact-alphabetical for metadata/permissions/lfs; non-BMP
       emoji escaped as UPPERCASE `\uXXXX` surrogate pairs, BMP non-ASCII raw UTF-8,
       no trailing newlines); bare-repo skeleton (HEAD/config/app-info.gc.pid/refs/
-      stash-refs/reflogs); loose-object tar via `git repack -adf` + `unpack-objects`;
+      stash-refs/reflogs); loose-object tar via `git repack -ad` + `unpack-objects`;
       PR metadata/activities (derived from REST, ordering = comments-first then
       chronological); caches (`cached-ancestor.txt` = fromTip,toTip,mergeBase).
 - [x] `validate` — schema self-check (paths + gzip headers).

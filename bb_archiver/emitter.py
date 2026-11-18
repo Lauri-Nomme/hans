@@ -547,7 +547,11 @@ class Emitter:
         objects, no per-object files on disk, parallel chunked streaming)."""
         if os.path.isdir(os.path.join(gitdir, "objects", "pack")):
             _log("git objects: repacking mirror")
-            subprocess.run(["git", "repack", "-adf"], check=True, cwd=gitdir,
+            # `-ad` (not `-adf`): bb-obj-tar recompresses every object at zlib
+            # level 1 anyway, so the pack's delta encoding is discarded — `-f`
+            # only wastes time re-deltaing the whole repo. `-ad` still yields
+            # the single pack bb-obj-tar requires.
+            subprocess.run(["git", "repack", "-ad"], check=True, cwd=gitdir,
                            capture_output=True)
         if self.obj_tar_chunks:
             _log(f"git objects: bb-obj-tar streaming objects (chunks={self.obj_tar_chunks})")
@@ -572,7 +576,7 @@ class Emitter:
             # fresh single pack from the mirror
             if os.path.isdir(os.path.join(gitdir, "objects", "pack")):
                 _log("git objects: repacking mirror")
-                subprocess.run(["git", "repack", "-adf"], check=True, cwd=gitdir,
+                subprocess.run(["git", "repack", "-ad"], check=True, cwd=gitdir,
                                capture_output=True)
             packdir = os.path.join(gitdir, "objects", "pack")
             packs = [p for p in os.listdir(packdir) if p.endswith(".pack")]
