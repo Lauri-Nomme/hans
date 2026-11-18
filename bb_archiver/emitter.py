@@ -439,33 +439,41 @@ class Emitter:
             lines.append(f"{old} {new} Bitbucket Mesh <bitbucket.mesh@atlassian.com> {ts // 1000} +0000\n")
         return "".join(lines).encode()
 
-    def _available_objects(self):
-        """Set of every object sha present in the git mirror (loose + packed),
-        or None when the mirror is unavailable (cannot check -> keep refs)."""
-        if not getattr(self, "_avail_objs_ready", False):
-            self._avail_objs_ready = True
-            self._avail_objs = None
-            gitdir = self.m.dir / "git"
-            if (gitdir / "objects").exists():
-                try:
-                    p = subprocess.run(
-                        ["git", "cat-file", "--batch-all-objects",
-                         "--batch-check=%(objectname)"],
-                        capture_output=True, text=True, cwd=gitdir)
-                    self._avail_objs = {l.strip()
-                                        for l in p.stdout.splitlines() if l.strip()}
-                except Exception:
-                    self._avail_objs = None
-        return self._avail_objs
+    def _present_shas(self, shas):
+        """Subset of `shas` present in the git mirror, in one `cat-file
+        --batch-check` pass — O(wanted), never materializing the full object
+        set (which is the cost on a 10M+-object repo). Returns None when the
+        mirror is unavailable (cannot check -> keep every ref)."""
+        gitdir = self.m.dir / "git"
+        if not (gitdir / "objects").exists():
+            return None
+        # filter out any None/empty target (a malformed dump): it will be
+        # treated as absent and dropped+warned by _add_ref, matching the old
+        # defensive behavior, instead of crashing sorted().
+        shas = sorted({s for s in shas if s})
+        if not shas:
+            return set()
+        try:
+            p = subprocess.run(
+                ["git", "cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                input="".join(f"{s}\n" for s in shas),
+                capture_output=True, text=True, cwd=gitdir)
+        except Exception:
+            return None
+        present = set()
+        for line in p.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] != "missing":
+                present.add(parts[0])
+        return present
 
-    def _add_ref(self, entries, name, sha, kind):
-        """Write a ref only if its target object exists in the mirror. A REST
-        branch/tag tip can point at an object the git mirror lacks (snapshots
-        taken at different moments) — emitting it yields a dangling ref that
-        breaks import ('missing object ... for refs/...'). Drop + warn instead.
-        """
-        avail = self._available_objects()
-        if avail is not None and sha not in avail:
+    def _add_ref(self, entries, name, sha, kind, present):
+        """Write a ref only if its target object exists in the mirror (checked
+        against the batch result in `present`). A REST branch/tag tip can point
+        at an object the git mirror lacks (snapshots taken at different
+        moments) — emitting it yields a dangling ref that breaks import
+        ('missing object ... for refs/...'). Drop + warn instead."""
+        if present is not None and sha not in present:
             msg = (f"dropping {kind} ref {name}: object {sha} not present in "
                    f"git mirror (scrape-time race) — emitting it would break import")
             self.m.warnings.append(msg)
@@ -493,39 +501,53 @@ class Emitter:
         entries = {"HEAD": f"ref: refs/heads/{self._default_branch()}\n".encode(),
                    "config": CONFIG_BYTES,
                    "app-info/gc.pid": b"499@bd157217c6d7"}
+        # Gather every ref-target sha up front for a single batch existence
+        # check (O(wanted)), then write refs in the same order as before.
+        all_shas = set()
         for b in self.m.branches() or []:
-            display = b.get("displayId") or b["id"].replace("refs/heads/", "")
-            self._add_ref(entries, f"refs/heads/{display}",
-                          b["latestCommit"], "branch")
+            all_shas.add(b["latestCommit"])
         for t in self.m.tags() or []:
-            display = t.get("displayId") or t["id"].replace("refs/tags/", "")
-            target = t.get("hash") or t["latestCommit"]   # annotated -> tag object
-            self._add_ref(entries, f"refs/tags/{display}", target, "tag")
+            all_shas.add(t.get("hash") or t["latestCommit"])
+        keep_shas = []
         if self.keep_tag_prefix:
             # EXPERIMENT: expose every refs/keep/<sha> in the scrape mirror as a
             # real tag, making force-pushed-away commits reachable on GH.
             gitdir = self.m.dir / "git"
-            shas = []
             if (gitdir / "objects").exists():
                 try:
                     p = subprocess.run(
                         ["git", "-C", str(gitdir), "for-each-ref", "refs/keep/",
                          "--format=%(objectname)"],
                         capture_output=True, text=True)
-                    shas = sorted({l.strip() for l in p.stdout.splitlines() if l.strip()})
+                    keep_shas = sorted({l.strip() for l in p.stdout.splitlines()
+                                        if l.strip()})
                 except Exception as e:
                     _log(f"keep-tag: for-each-ref failed: {e}")
-            for sha in shas:
+            all_shas.update(keep_shas)
+        for pr in self.m.prs() or []:
+            all_shas.add(pr["fromRef"]["latestCommit"])
+        present = self._present_shas(all_shas)
+
+        for b in self.m.branches() or []:
+            display = b.get("displayId") or b["id"].replace("refs/heads/", "")
+            self._add_ref(entries, f"refs/heads/{display}",
+                          b["latestCommit"], "branch", present)
+        for t in self.m.tags() or []:
+            display = t.get("displayId") or t["id"].replace("refs/tags/", "")
+            target = t.get("hash") or t["latestCommit"]   # annotated -> tag object
+            self._add_ref(entries, f"refs/tags/{display}", target, "tag", present)
+        if self.keep_tag_prefix:
+            for sha in keep_shas:
                 self._add_ref(entries, f"refs/tags/{self.keep_tag_prefix}{sha}",
-                              sha, "keep-tag")
-            _log(f"keep-tag: emitted {len(shas)} refs/tags/"
+                              sha, "keep-tag", present)
+            _log(f"keep-tag: emitted {len(keep_shas)} refs/tags/"
                  f"{self.keep_tag_prefix}<sha> (experimental)")
         for pr in self.m.prs() or []:
             if pr.get("state") == "OPEN":
                 self._add_ref(entries, f"refs/pull-requests/{pr['id']}/from",
-                              pr["fromRef"]["latestCommit"], "pulls")
+                              pr["fromRef"]["latestCommit"], "pulls", present)
             self._add_ref(entries, f"stash-refs/pull-requests/{pr['id']}/from",
-                          pr["fromRef"]["latestCommit"], "pulls")
+                          pr["fromRef"]["latestCommit"], "pulls", present)
             entries[f"logs/stash-refs/pull-requests/{pr['id']}/from"] = \
                 self._reflog(pr, self.m.activities(pr["id"]) or [])
         return _gzbuf(_tar_buf(entries))
